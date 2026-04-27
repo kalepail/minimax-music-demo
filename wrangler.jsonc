@@ -20,18 +20,51 @@
 			"bucket_name": "minimax-music-demo-audio"
 		}
 	],
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "minimax-music-demo-catalog",
+			"database_id": "c9da9922-c0de-4c9b-8e97-750956c7934b"
+		}
+	],
 	"assets": {
 		"directory": "./public/",
 		"binding": "ASSETS"
 	},
 	"vars": {
-		"AI_GATEWAY_ID": "default"
+		"AI_GATEWAY_ID": "default",
+		"RADIO_AUTOFILL": "true"
+	},
+	"triggers": {
+		"crons": ["*/5 * * * *"]
+	},
+	"queues": {
+		"producers": [
+			{
+				"queue": "minimax-music-radio",
+				"binding": "RADIO_QUEUE"
+			}
+		],
+		"consumers": [
+			{
+				"queue": "minimax-music-radio",
+				"max_batch_size": 1,
+				"max_batch_timeout": 5,
+				"max_retries": 2,
+				"max_concurrency": 10,
+				"dead_letter_queue": "minimax-music-radio-dlq"
+			}
+		]
 	},
 	"durable_objects": {
 		"bindings": [
 			{
 				"name": "MUSIC_JOB",
 				"class_name": "MusicJob"
+			},
+			{
+				"name": "RADIO_STATION",
+				"class_name": "RadioStation"
 			}
 		]
 	},
@@ -39,6 +72,10 @@
 		{
 			"tag": "v1",
 			"new_sqlite_classes": ["MusicJob"]
+		},
+		{
+			"tag": "v2",
+			"new_sqlite_classes": ["RadioStation"]
 		}
 	]
 }

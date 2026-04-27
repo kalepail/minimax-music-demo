@@ -15,6 +15,7 @@
 				--accent: #7c5cff;
 				--accent-hover: #9079ff;
 				--danger: #ff6b6b;
+				--ok: #4bd6a6;
 			}
 			* {
 				box-sizing: border-box;
@@ -27,7 +28,7 @@
 				font: 15px/1.5 -apple-system, system-ui, "Segoe UI", sans-serif;
 			}
 			main {
-				max-width: 720px;
+				max-width: 980px;
 				margin: 48px auto;
 				padding: 0 20px;
 			}
@@ -44,6 +45,16 @@
 				border: 1px solid var(--border);
 				border-radius: 12px;
 				padding: 20px;
+			}
+			.grid {
+				display: grid;
+				grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+				gap: 18px;
+				margin-top: 28px;
+			}
+			.section-title {
+				margin: 0 0 12px;
+				font-size: 16px;
 			}
 			label {
 				display: block;
@@ -93,6 +104,14 @@
 				font: 600 15px inherit;
 				cursor: pointer;
 			}
+			button.secondary {
+				background: #20283a;
+				color: var(--text);
+				border: 1px solid var(--border);
+			}
+			button.secondary:hover:not(:disabled) {
+				background: #2a344b;
+			}
 			button:hover:not(:disabled) {
 				background: var(--accent-hover);
 			}
@@ -121,12 +140,107 @@
 				font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 				word-break: break-all;
 			}
+			.station-bar {
+				display: flex;
+				gap: 10px;
+				flex-wrap: wrap;
+				color: var(--muted);
+				font-size: 13px;
+				margin-bottom: 14px;
+			}
+			.pill {
+				border: 1px solid var(--border);
+				border-radius: 999px;
+				padding: 3px 9px;
+				background: #0e121b;
+			}
+			.song-list {
+				display: grid;
+				gap: 10px;
+				margin-top: 12px;
+			}
+			.song {
+				border: 1px solid var(--border);
+				border-radius: 8px;
+				background: #0e121b;
+				padding: 12px;
+			}
+			.song button {
+				margin-top: 10px;
+				padding: 8px 10px;
+			}
+			.song-title {
+				font-weight: 700;
+			}
+			.song-meta {
+				color: var(--muted);
+				font-size: 12px;
+				margin-top: 4px;
+			}
+			.request-list {
+				margin-top: 12px;
+				display: grid;
+				gap: 8px;
+				color: var(--muted);
+				font-size: 13px;
+			}
+			.request-item {
+				border-left: 2px solid var(--accent);
+				padding-left: 9px;
+			}
+			.control-strip {
+				display: grid;
+				grid-template-columns: repeat(3, minmax(0, 1fr));
+				gap: 10px;
+				margin: 12px 0;
+			}
+			.library-grid {
+				display: grid;
+				grid-template-columns: repeat(2, minmax(0, 1fr));
+				gap: 10px;
+			}
+			.library-actions {
+				display: flex;
+				gap: 10px;
+			}
+			.library-actions button {
+				width: auto;
+				flex: 1;
+			}
+			.tag-row {
+				display: flex;
+				flex-wrap: wrap;
+				gap: 6px;
+				margin-top: 8px;
+			}
+			.tag {
+				border: 1px solid var(--border);
+				border-radius: 999px;
+				color: var(--muted);
+				font-size: 11px;
+				padding: 2px 7px;
+			}
+			#stationPlayer {
+				margin-top: 8px;
+			}
+			@media (max-width: 760px) {
+				main {
+					margin-top: 24px;
+				}
+				.grid {
+					grid-template-columns: 1fr;
+				}
+				.control-strip,
+				.library-grid {
+					grid-template-columns: 1fr;
+				}
+			}
 		</style>
 	</head>
 	<body>
 		<main>
 			<h1>MiniMax Music 2.6</h1>
-			<p class="sub">Async job flow: a Durable Object runs generation in the background while the browser polls for status.</p>
+			<p class="sub">Generate single songs, or tune into the always-filling station backed by Queues, Durable Objects, Workers AI, and R2.</p>
 
 			<form id="form" class="panel">
 				<label for="prompt">Prompt</label>
@@ -167,6 +281,82 @@
 
 			<audio id="player" controls preload="none" style="display: none"></audio>
 			<p id="source" class="hint"></p>
+
+			<div class="grid">
+				<section class="panel">
+					<h2 class="section-title">Radio station</h2>
+					<div class="control-strip">
+						<div>
+							<label for="stationGenre">Station</label>
+							<select id="stationGenre">
+								<option value="">Main radio</option>
+							</select>
+						</div>
+						<div>
+							<label for="stationSort">Library sort</label>
+							<select id="stationSort">
+								<option value="newest" selected>Newest</option>
+								<option value="oldest">Oldest</option>
+								<option value="title">Title</option>
+								<option value="energy">Energy</option>
+							</select>
+						</div>
+						<div>
+							<label>&nbsp;</label>
+							<button type="button" id="loadLibrary" class="secondary" style="margin-top: 0">Load library</button>
+						</div>
+					</div>
+					<div class="station-bar">
+						<span class="pill" id="radioCount">songs=0</span>
+						<span class="pill" id="radioInflight">in_flight=0</span>
+						<span class="pill" id="radioTarget">target=10</span>
+					</div>
+					<audio id="stationPlayer" controls preload="none"></audio>
+					<div id="nowPlaying" class="status">Loading station...</div>
+					<button type="button" id="fillRadio" class="secondary">Fill station queue</button>
+					<div id="playlist" class="song-list"></div>
+				</section>
+
+				<section class="panel">
+					<h2 class="section-title">Listener requests</h2>
+					<label for="radioPrompt">Request</label>
+					<textarea
+						id="radioPrompt"
+						maxlength="500"
+						placeholder="cosmic disco sea shanty with modular synth bass and a euphoric chorus"
+					></textarea>
+					<button type="button" id="sendRadioRequest">Send request</button>
+					<div id="radioStatus" class="status"></div>
+					<div id="requests" class="request-list"></div>
+				</section>
+			</div>
+
+			<section class="panel" style="margin-top: 18px">
+				<h2 class="section-title">Library</h2>
+				<div class="library-grid">
+					<div>
+						<label for="libraryGenre">Genre</label>
+						<select id="libraryGenre">
+							<option value="">All genres</option>
+						</select>
+					</div>
+					<div>
+						<label for="libraryTag">Tag</label>
+						<input
+							id="libraryTag"
+							type="text"
+							placeholder="modular synth"
+							style="width: 100%; background: #0e121b; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font: inherit"
+						/>
+					</div>
+				</div>
+				<div class="library-actions">
+					<button type="button" id="applyLibrary" class="secondary">Apply filters</button>
+					<button type="button" id="moreLibrary" class="secondary">Load more</button>
+				</div>
+				<div id="libraryStatus" class="status"></div>
+				<div id="library" class="song-list"></div>
+			</section>
 		</main>
 
 		<script>
@@ -179,10 +369,34 @@
 			const statusEl = document.getElementById("status");
 			const player = document.getElementById("player");
 			const sourceEl = document.getElementById("source");
+			const stationPlayer = document.getElementById("stationPlayer");
+			const nowPlayingEl = document.getElementById("nowPlaying");
+			const radioCountEl = document.getElementById("radioCount");
+			const radioInflightEl = document.getElementById("radioInflight");
+			const radioTargetEl = document.getElementById("radioTarget");
+			const playlistEl = document.getElementById("playlist");
+			const fillRadioButton = document.getElementById("fillRadio");
+			const stationGenreEl = document.getElementById("stationGenre");
+			const stationSortEl = document.getElementById("stationSort");
+			const loadLibraryButton = document.getElementById("loadLibrary");
+			const radioPromptEl = document.getElementById("radioPrompt");
+			const sendRadioRequestButton = document.getElementById("sendRadioRequest");
+			const radioStatusEl = document.getElementById("radioStatus");
+			const requestsEl = document.getElementById("requests");
+			const libraryGenreEl = document.getElementById("libraryGenre");
+			const libraryTagEl = document.getElementById("libraryTag");
+			const applyLibraryButton = document.getElementById("applyLibrary");
+			const moreLibraryButton = document.getElementById("moreLibrary");
+			const libraryStatusEl = document.getElementById("libraryStatus");
+			const libraryEl = document.getElementById("library");
 
 			const POLL_INTERVAL_MS = 3000;
 			const POLL_TIMEOUT_MS = 15 * 60 * 1000;
 			const JOB_STORAGE_KEY = "minimax-music-demo:last-job";
+			const RADIO_REFRESH_MS = 5000;
+			let radioStatus = null;
+			let libraryCursor = "0";
+			let loadedLibrarySongs = [];
 
 			instrumentalEl.addEventListener("change", () => {
 				lyricsEl.disabled = instrumentalEl.checked;
@@ -231,6 +445,98 @@
 					fail(err && err.message ? err.message : String(err));
 				}
 			});
+
+			fillRadioButton.addEventListener("click", async () => {
+				fillRadioButton.disabled = true;
+				radioStatusEl.classList.remove("error");
+				radioStatusEl.textContent = "Filling station queue...";
+				try {
+					const res = await fetch("/api/radio/fill", {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify(currentStationPayload()),
+					});
+					const data = await res.json();
+					if (!res.ok) throw new Error(data.error || `fill failed: ${res.status}`);
+					radioStatusEl.textContent = `queued=${data.queued} target=${data.target}`;
+					await loadRadio();
+				} catch (err) {
+					radioFail(err && err.message ? err.message : String(err));
+				} finally {
+					fillRadioButton.disabled = false;
+				}
+			});
+
+			sendRadioRequestButton.addEventListener("click", async () => {
+				const prompt = radioPromptEl.value.trim();
+				if (!prompt) return;
+				sendRadioRequestButton.disabled = true;
+				radioStatusEl.classList.remove("error");
+				radioStatusEl.textContent = "Sending request...";
+				try {
+					const res = await fetch("/api/radio/request", {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({ prompt, ...currentStationPayload() }),
+					});
+					const data = await res.json();
+					if (!res.ok) throw new Error(data.error || `request failed: ${res.status}`);
+					radioPromptEl.value = "";
+					radioStatusEl.textContent = `request saved queued=${data.queued}`;
+					await loadRadio();
+				} catch (err) {
+					radioFail(err && err.message ? err.message : String(err));
+				} finally {
+					sendRadioRequestButton.disabled = false;
+				}
+			});
+
+			stationGenreEl.addEventListener("change", async () => {
+				clearCurrentStation();
+				await loadRadio();
+				resetLibrary();
+				await loadLibraryPage();
+			});
+
+			loadLibraryButton.addEventListener("click", async () => {
+				resetLibrary();
+				await loadLibraryPage();
+			});
+
+			stationSortEl.addEventListener("change", async () => {
+				resetLibrary();
+				await loadLibraryPage();
+			});
+
+			libraryGenreEl.addEventListener("change", async () => {
+				if (libraryGenreEl.value) stationGenreEl.value = libraryGenreEl.value;
+				resetLibrary();
+				await loadLibraryPage();
+			});
+
+			applyLibraryButton.addEventListener("click", async () => {
+				resetLibrary();
+				await loadLibraryPage();
+			});
+
+			moreLibraryButton.addEventListener("click", async () => {
+				await loadLibraryPage();
+			});
+
+			stationPlayer.addEventListener("ended", () => {
+				const list = radioStatus && Array.isArray(radioStatus.playlist) ? radioStatus.playlist : [];
+				const currentId = stationPlayer.dataset.songId;
+				const index = list.findIndex((song) => song.id === currentId);
+				const next = list[index + 1] || list[0];
+				if (next) playRadioSong(next);
+			});
+
+			loadStations().catch((err) => radioFail(err && err.message ? err.message : String(err)));
+			loadRadio().catch((err) => radioFail(err && err.message ? err.message : String(err)));
+			loadLibraryPage().catch((err) => libraryFail(err && err.message ? err.message : String(err)));
+			window.setInterval(() => {
+				loadRadio().catch((err) => radioFail(err && err.message ? err.message : String(err)));
+			}, RADIO_REFRESH_MS);
 
 			async function pollJob(jobId) {
 				let started = Date.now();
@@ -303,6 +609,173 @@
 			function clearSavedJob(id) {
 				const saved = window.localStorage.getItem(JOB_STORAGE_KEY);
 				if (saved === id) window.localStorage.removeItem(JOB_STORAGE_KEY);
+			}
+
+			async function loadRadio() {
+				const res = await fetch(`/api/radio/status${stationQueryString()}`);
+				const data = await res.json();
+				if (!res.ok) throw new Error(data.error || `radio status failed: ${res.status}`);
+				radioStatus = data;
+				renderRadio(data);
+			}
+
+			function renderRadio(data) {
+				const playlist = Array.isArray(data.playlist) ? data.playlist : [];
+				const requests = Array.isArray(data.requests) ? data.requests : [];
+				const inFlight = Array.isArray(data.in_flight) ? data.in_flight : [];
+				radioCountEl.textContent = `songs=${playlist.length}`;
+				radioInflightEl.textContent = `in_flight=${inFlight.length}`;
+				radioTargetEl.textContent = `target=${data.target_backlog ?? 10}`;
+
+				if (!stationPlayer.dataset.songId && playlist[0]) {
+					playRadioSong(playlist[0], false);
+				}
+				if (!playlist[0] && inFlight.length > 0) {
+					nowPlayingEl.textContent = "Songs are generating. The station will start when the first track lands.";
+				}
+				if (!playlist[0] && inFlight.length === 0) {
+					nowPlayingEl.textContent = "No station tracks yet. Fill the queue to start generating.";
+				}
+
+				playlistEl.innerHTML = "";
+				for (const song of playlist.slice(0, 20)) {
+					playlistEl.append(renderSongCard(song, false));
+				}
+
+				requestsEl.innerHTML = "";
+				for (const request of requests.slice(0, 10)) {
+					const item = document.createElement("div");
+					item.className = "request-item";
+					item.textContent = request.text;
+					requestsEl.append(item);
+				}
+			}
+
+			async function loadStations() {
+				const res = await fetch("/api/radio/stations");
+				const data = await res.json();
+				if (!res.ok) throw new Error(data.error || `station list failed: ${res.status}`);
+				const genres = Array.isArray(data.genres) ? data.genres : [];
+				const currentStation = stationGenreEl.value;
+				const currentLibrary = libraryGenreEl.value;
+				stationGenreEl.innerHTML = '<option value="">Main radio</option>';
+				libraryGenreEl.innerHTML = '<option value="">All genres</option>';
+				for (const genre of genres) {
+					const value = genre.genre;
+					const stationOption = document.createElement("option");
+					stationOption.value = value;
+					stationOption.textContent = `${value} (${genre.count})`;
+					stationGenreEl.append(stationOption);
+					const libraryOption = stationOption.cloneNode(true);
+					libraryGenreEl.append(libraryOption);
+				}
+				stationGenreEl.value = currentStation;
+				libraryGenreEl.value = currentLibrary;
+			}
+
+			async function loadLibraryPage() {
+				libraryStatusEl.classList.remove("error");
+				libraryStatusEl.textContent = "Loading library...";
+				const params = new URLSearchParams({
+					limit: "25",
+					cursor: libraryCursor,
+					sort: stationSortEl.value,
+				});
+				const genre = libraryGenreEl.value || stationGenreEl.value;
+				if (genre) params.set("genre", genre);
+				if (libraryTagEl.value.trim()) params.set("tag", libraryTagEl.value.trim());
+				const res = await fetch(`/api/library?${params.toString()}`);
+				const data = await res.json();
+				if (!res.ok) throw new Error(data.error || `library failed: ${res.status}`);
+				const songs = Array.isArray(data.songs) ? data.songs : [];
+				loadedLibrarySongs = [...loadedLibrarySongs, ...songs];
+				libraryCursor = data.next_cursor || "";
+				moreLibraryButton.disabled = !libraryCursor;
+				libraryStatusEl.textContent = `loaded=${loadedLibrarySongs.length}${libraryCursor ? "" : " end=true"}`;
+				renderLibrary();
+			}
+
+			function resetLibrary() {
+				libraryCursor = "0";
+				loadedLibrarySongs = [];
+				libraryEl.innerHTML = "";
+				moreLibraryButton.disabled = false;
+			}
+
+			function renderLibrary() {
+				libraryEl.innerHTML = "";
+				for (const song of loadedLibrarySongs) {
+					libraryEl.append(renderSongCard(song, true));
+				}
+			}
+
+			function playRadioSong(song, autoplay = true) {
+				stationPlayer.dataset.songId = song.id;
+				stationPlayer.src = `/api/radio/audio/${song.id}?v=${song.completed_at || Date.now()}`;
+				nowPlayingEl.textContent = `Now playing: ${song.title || "Untitled Signal"}`;
+				stationPlayer.load();
+				if (autoplay) stationPlayer.play().catch(() => {});
+			}
+
+			function renderSongCard(song, includeTags = false) {
+				const item = document.createElement("article");
+				item.className = "song";
+				const title = document.createElement("div");
+				title.className = "song-title";
+				title.textContent = song.title || "Untitled Signal";
+				const meta = document.createElement("div");
+				meta.className = "song-meta";
+				meta.textContent = [
+					new Date(song.completed_at).toLocaleString(),
+					song.primary_genre,
+					typeof song.energy === "number" ? `energy ${song.energy}` : "",
+					song.request_text ? `request: ${song.request_text}` : "",
+				].filter(Boolean).join(" · ");
+				const play = document.createElement("button");
+				play.type = "button";
+				play.className = "secondary";
+				play.textContent = "Play";
+				play.addEventListener("click", () => playRadioSong(song));
+				item.append(title, meta);
+				if (includeTags && Array.isArray(song.tags) && song.tags.length > 0) {
+					const tags = document.createElement("div");
+					tags.className = "tag-row";
+					for (const tag of song.tags) {
+						const pill = document.createElement("span");
+						pill.className = "tag";
+						pill.textContent = tag;
+						tags.append(pill);
+					}
+					item.append(tags);
+				}
+				item.append(play);
+				return item;
+			}
+
+			function radioFail(message) {
+				radioStatusEl.classList.add("error");
+				radioStatusEl.textContent = `error: ${message}`;
+			}
+
+			function libraryFail(message) {
+				libraryStatusEl.classList.add("error");
+				libraryStatusEl.textContent = `error: ${message}`;
+			}
+
+			function currentStationPayload() {
+				const genre = stationGenreEl.value;
+				return genre ? { genre } : { station_id: "main" };
+			}
+
+			function stationQueryString() {
+				const genre = stationGenreEl.value;
+				return genre ? `?genre=${encodeURIComponent(genre)}` : "";
+			}
+
+			function clearCurrentStation() {
+				stationPlayer.removeAttribute("src");
+				delete stationPlayer.dataset.songId;
+				nowPlayingEl.textContent = "Loading station...";
 			}
 		</script>
 	</body>

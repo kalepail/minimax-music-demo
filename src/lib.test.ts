@@ -10,10 +10,18 @@ import {
 	audioResponseHeaders,
 	clientRateLimitKey,
 	extractAudioUrl,
+	extractTextResponse,
 	isStaleRunningJob,
+	parseLibraryQuery,
 	parseRangeHeader,
 	parseInput,
+	parseRadioRequest,
+	parseStationParams,
 	publicStatus,
+	genreStationId,
+	radioAudioObjectKey,
+	radioMetadataObjectKey,
+	normalizeTags,
 	storedAudioResponseHeaders,
 	storedAudioStatus,
 	shouldCleanUp,
@@ -177,10 +185,63 @@ describe("extractAudioUrl", () => {
 	});
 });
 
+describe("extractTextResponse", () => {
+	it("supports common Workers AI text response shapes", () => {
+		expect(extractTextResponse(" hello ")).toBe("hello");
+		expect(extractTextResponse({ response: "song plan" })).toBe("song plan");
+		expect(extractTextResponse({ result: "fallback result" })).toBe("fallback result");
+	});
+});
+
 describe("audioObjectKey", () => {
 	it("creates stable per-job R2 keys", () => {
 		expect(audioObjectKey("job-123", "mp3")).toBe("music/job-123.mp3");
 		expect(audioObjectKey("job-123", "wav")).toBe("music/job-123.wav");
+	});
+});
+
+describe("radio helpers", () => {
+	it("creates stable station R2 keys", () => {
+		expect(radioAudioObjectKey("song-123", "mp3")).toBe("radio/audio/song-123.mp3");
+		expect(radioMetadataObjectKey("song-123")).toBe("radio/metadata/song-123.json");
+		expect(genreStationId("Cosmic Disco!")).toBe("genre:cosmic-disco");
+	});
+
+	it("normalizes listener requests", () => {
+		expect(parseRadioRequest({ prompt: "  cosmic funk  " })).toEqual({ text: "cosmic funk" });
+		expect(parseRadioRequest({ request: "ambient lullaby", genre: "drone" })).toEqual({ text: "ambient lullaby" });
+		expect(parseRadioRequest({ prompt: "" })).toEqual({ error: "prompt is required" });
+		expect(parseRadioRequest({ prompt: "x".repeat(501) })).toEqual({ error: "prompt must be <= 500 chars" });
+	});
+
+	it("deduplicates and limits normalized tags", () => {
+		expect(normalizeTags([" Disco ", "disco", "", 3, "Modular Synth"])).toEqual(["disco", "modular synth"]);
+	});
+
+	it("parses library filters and pagination", () => {
+		const query = parseLibraryQuery(
+			new URL("https://example.com/api/library?limit=200&cursor=25&sort=energy&genre=Ambient%20Drone&tag=Long%20Tail"),
+		);
+		expect(query).toMatchObject({
+			limit: 100,
+			cursor: 25,
+			sort: "energy",
+			genre: "ambient drone",
+			tag: "long tail",
+		});
+		expect(parseLibraryQuery(new URL("https://example.com/api/library?sort=random"))).toEqual({
+			error: "sort must be newest, oldest, title, or energy",
+		});
+	});
+
+	it("derives genre stations from request params", () => {
+		expect(parseStationParams(new URL("https://example.com/api/radio/status?genre=Cosmic%20Disco"))).toEqual({
+			station_id: "genre:cosmic-disco",
+			genre: "cosmic disco",
+		});
+		expect(parseStationParams(new URL("https://example.com/api/radio/status?station=main"))).toEqual({
+			station_id: "main",
+		});
 	});
 });
 
