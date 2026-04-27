@@ -51,6 +51,7 @@
 				color: var(--muted);
 				margin-bottom: 6px;
 			}
+			input[type="password"],
 			textarea,
 			select {
 				width: 100%;
@@ -126,7 +127,7 @@
 	<body>
 		<main>
 			<h1>MiniMax Music 2.6</h1>
-			<p class="sub">Async job flow — Durable Object runs generation in the background with AI Gateway cache-key retry.</p>
+			<p class="sub">Async job flow: a Durable Object runs generation in the background while the browser polls for status.</p>
 
 			<form id="form" class="panel">
 				<label for="prompt">Prompt</label>
@@ -161,6 +162,9 @@
 					</div>
 				</div>
 
+				<label for="token" style="margin-top: 14px">Demo token (if required)</label>
+				<input id="token" type="password" autocomplete="off" />
+
 				<button type="submit" id="go">Generate song</button>
 				<div id="status" class="status"></div>
 			</form>
@@ -175,13 +179,14 @@
 			const lyricsEl = document.getElementById("lyrics");
 			const formatEl = document.getElementById("format");
 			const instrumentalEl = document.getElementById("instrumental");
+			const tokenEl = document.getElementById("token");
 			const button = document.getElementById("go");
 			const statusEl = document.getElementById("status");
 			const player = document.getElementById("player");
 			const sourceEl = document.getElementById("source");
 
 			const POLL_INTERVAL_MS = 3000;
-			const POLL_TIMEOUT_MS = 32 * 60 * 1000;
+			const POLL_TIMEOUT_MS = 15 * 60 * 1000;
 
 			instrumentalEl.addEventListener("change", () => {
 				lyricsEl.disabled = instrumentalEl.checked;
@@ -219,7 +224,7 @@
 				try {
 					const res = await fetch("/api/generate", {
 						method: "POST",
-						headers: { "Content-Type": "application/json" },
+						headers: requestHeaders(),
 						body: JSON.stringify(body),
 					});
 					const data = await res.json();
@@ -244,7 +249,7 @@
 						player.style.display = "block";
 						player.play().catch(() => {});
 						statusEl.textContent = `state=complete attempts=${data.attempts} elapsed=${elapsed}s`;
-						sourceEl.textContent = formatAttempts(data.attempt_log);
+						sourceEl.textContent = `job_id=${jobId}`;
 						button.disabled = false;
 						return;
 					}
@@ -267,7 +272,7 @@
 			function formatAttempts(log) {
 				if (!Array.isArray(log) || log.length === 0) return "";
 				return log
-					.map((a) => `#${a.attempt} ${a.duration_ms}ms cache_hit=${a.cache_hit} log_id=${a.log_id ?? "?"}${a.error ? ` err=${a.error}` : ""}`)
+					.map((a) => `#${a.attempt} ${a.duration_ms}ms${a.error ? ` err=${a.error}` : ""}`)
 					.join(" | ");
 			}
 
@@ -283,6 +288,12 @@
 
 			function writeJobToHash(id) {
 				window.location.hash = `job=${id}`;
+			}
+
+			function requestHeaders() {
+				const headers = { "Content-Type": "application/json" };
+				if (tokenEl.value.trim()) headers["X-Demo-Token"] = tokenEl.value.trim();
+				return headers;
 			}
 		</script>
 	</body>

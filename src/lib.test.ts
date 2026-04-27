@@ -1,0 +1,222 @@
+import { describe, expect, it } from "vitest";
+import {
+	ATTEMPT_TIMEOUT_MS,
+	JOB_TTL_MS,
+	RATE_LIMIT_MAX_JOBS,
+	RATE_LIMIT_WINDOW_MS,
+	STALE_JOB_MS,
+	applyRateLimit,
+	audioResponseHeaders,
+	clientRateLimitKey,
+	extractAudioUrl,
+	isDemoTokenAuthorized,
+	isStaleRunningJob,
+	parseInput,
+	publicStatus,
+	readDemoToken,
+	shouldCleanUp,
+	type JobRecord,
+} from "./lib";
+
+const baseJob: JobRecord = {
+	state: "complete",
+	input: {
+		prompt: "A bright synth pop song",
+		is_instrumental: false,
+		format: "mp3",
+		lyrics: "private lyrics",
+	},
+	audio_url: "https://example.com/audio.mp3",
+	attempts: 1,
+	attempt_log: [],
+	created_at: 1,
+	completed_at: 2,
+	expires_at: 3,
+};
+
+describe("parseInput", () => {
+	it("normalizes valid input", () => {
+		expect(
+			parseInput({
+				prompt: "  ambient piano  ",
+				format: "wav",
+				is_instrumental: false,
+				lyrics: "  line one\nline two  ",
+			}),
+		).toEqual({
+			prompt: "ambient piano",
+			format: "wav",
+			is_instrumental: false,
+			lyrics: "line one\nline two",
+		});
+	});
+
+	it("defaults omitted formats to mp3", () => {
+		expect(parseInput({ prompt: "song", is_instrumental: false })).toMatchObject({
+			format: "mp3",
+		});
+	});
+
+	it("rejects unsupported formats when provided", () => {
+		expect(parseInput({ prompt: "song", format: "flac", is_instrumental: false })).toEqual({
+			error: "format must be mp3 or wav",
+		});
+	});
+
+	it("drops lyrics for instrumental jobs", () => {
+		expect(parseInput({ prompt: "song", is_instrumental: true, lyrics: "ignore me" })).toEqual({
+			prompt: "song",
+			format: "mp3",
+			is_instrumental: true,
+		});
+	});
+
+	it("rejects missing and oversized prompts", () => {
+		expect(parseInput({ prompt: "" })).toEqual({ error: "prompt is required" });
+		expect(parseInput({ prompt: "x".repeat(2000) })).toMatchObject({ prompt: "x".repeat(2000) });
+		expect(parseInput({ prompt: "x".repeat(2001) })).toEqual({ error: "prompt must be <= 2000 chars" });
+	});
+
+	it("rejects oversized lyrics instead of truncating them", () => {
+		expect(parseInput({ prompt: "song", lyrics: "x".repeat(3500) })).toMatchObject({
+			lyrics: "x".repeat(3500),
+		});
+		expect(parseInput({ prompt: "song", lyrics: "x".repeat(3501) })).toEqual({
+			error: "lyrics must be <= 3500 chars",
+		});
+	});
+});
+
+describe("publicStatus", () => {
+	it("redacts audio URLs and submitted input", () => {
+		expect(publicStatus(baseJob)).toEqual({
+			state: "complete",
+			attempts: 1,
+			attempt_log: [],
+			created_at: 1,
+			completed_at: 2,
+			expires_at: 3,
+			ready: true,
+		});
+	});
+});
+
+describe("job lifecycle helpers", () => {
+	it("only cleans up final jobs once their expiration has passed", () => {
+		expect(shouldCleanUp({ ...baseJob, expires_at: 100 }, 99)).toBe(false);
+		expect(shouldCleanUp({ ...baseJob, expires_at: 100 }, 100)).toBe(true);
+		expect(shouldCleanUp({ ...baseJob, state: "running", expires_at: 100 }, 100)).toBe(false);
+	});
+
+	it("detects stale running jobs after the attempt grace period", () => {
+		const running: JobRecord = {
+			...baseJob,
+			state: "running",
+			started_at: 1000,
+			completed_at: undefined,
+			expires_at: undefined,
+		};
+
+		expect(isStaleRunningJob(running, 1000 + STALE_JOB_MS)).toBe(false);
+		expect(isStaleRunningJob(running, 1001 + STALE_JOB_MS)).toBe(true);
+	});
+});
+
+describe("rate limiting", () => {
+	it("allows requests until the per-window limit is reached", () => {
+		let result = applyRateLimit(undefined, 1000);
+		expect(result.allowed).toBe(true);
+		expect(result.remaining).toBe(RATE_LIMIT_MAX_JOBS - 1);
+
+		for (let i = 1; i < RATE_LIMIT_MAX_JOBS; i++) {
+			result = applyRateLimit(result.record, 1000 + i);
+		}
+		expect(result.allowed).toBe(true);
+		expect(result.remaining).toBe(0);
+
+		const rejected = applyRateLimit(result.record, 2000);
+		expect(rejected.allowed).toBe(false);
+		expect(rejected.retry_after_ms).toBe(RATE_LIMIT_WINDOW_MS - 1000);
+	});
+
+	it("starts a new window after expiration", () => {
+		const first = applyRateLimit(undefined, 1000);
+		const next = applyRateLimit(first.record, 1000 + RATE_LIMIT_WINDOW_MS);
+		expect(next.allowed).toBe(true);
+		expect(next.record.count).toBe(1);
+	});
+
+	it("uses Cloudflare client IP headers for rate keys", () => {
+		expect(clientRateLimitKey(new Request("https://example.com", { headers: { "CF-Connecting-IP": "203.0.113.10" } }))).toBe(
+			"rate:203.0.113.10",
+		);
+		expect(clientRateLimitKey(new Request("https://example.com", { headers: { "X-Forwarded-For": "198.51.100.1, 10.0.0.1" } }))).toBe(
+			"rate:198.51.100.1",
+		);
+	});
+});
+
+describe("demo token helpers", () => {
+	it("ignores missing and blank configured tokens", () => {
+		expect(readDemoToken({})).toBeUndefined();
+		expect(readDemoToken({ DEMO_TOKEN: "   " })).toBeUndefined();
+	});
+
+	it("accepts x-demo-token and bearer tokens", () => {
+		expect(isDemoTokenAuthorized(new Request("https://example.com", { headers: { "X-Demo-Token": "secret" } }), "secret")).toBe(
+			true,
+		);
+		expect(isDemoTokenAuthorized(new Request("https://example.com", { headers: { Authorization: "Bearer secret" } }), "secret")).toBe(
+			true,
+		);
+		expect(isDemoTokenAuthorized(new Request("https://example.com"), "secret")).toBe(false);
+	});
+});
+
+describe("extractAudioUrl", () => {
+	it("supports direct and nested response shapes", () => {
+		expect(extractAudioUrl({ audio: "https://example.com/direct.mp3" })).toBe("https://example.com/direct.mp3");
+		expect(extractAudioUrl({ result: { audio: "https://example.com/nested.mp3" } })).toBe(
+			"https://example.com/nested.mp3",
+		);
+	});
+});
+
+describe("audioResponseHeaders", () => {
+	it("does not advertise byte ranges unless the upstream does", () => {
+		const upstream = new Response(null, {
+			headers: {
+				"content-length": "5",
+			},
+		});
+
+		const headers = audioResponseHeaders(baseJob, upstream);
+		expect(headers.get("Accept-Ranges")).toBe("none");
+		expect(headers.get("Content-Length")).toBe("5");
+		expect(headers.get("Cache-Control")).toBe("no-store");
+		expect(headers.get("Content-Type")).toBe("audio/mpeg");
+	});
+
+	it("passes through partial content headers", () => {
+		const upstream = new Response("audio", {
+			headers: {
+				"accept-ranges": "bytes",
+				"content-range": "bytes 0-4/10",
+				"content-type": "audio/custom",
+			},
+		});
+
+		const headers = audioResponseHeaders(baseJob, upstream);
+		expect(headers.get("Accept-Ranges")).toBe("bytes");
+		expect(headers.get("Content-Range")).toBe("bytes 0-4/10");
+		expect(headers.get("Content-Type")).toBe("audio/custom");
+	});
+});
+
+describe("timeout constants", () => {
+	it("keeps the attempt below the 15-minute Durable Object alarm wall-time limit", () => {
+		expect(ATTEMPT_TIMEOUT_MS).toBeLessThan(15 * 60 * 1000);
+		expect(STALE_JOB_MS).toBeGreaterThan(ATTEMPT_TIMEOUT_MS);
+		expect(JOB_TTL_MS).toBe(60 * 60 * 1000);
+	});
+});
