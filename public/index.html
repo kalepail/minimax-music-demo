@@ -154,8 +154,10 @@
 				padding: 3px 9px;
 				background: #0e121b;
 			}
-			.song-list {
+			.song-list,
+			.library-cards {
 				display: grid;
+				grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
 				gap: 10px;
 				margin-top: 12px;
 			}
@@ -176,12 +178,6 @@
 				color: var(--muted);
 				font-size: 12px;
 				margin-top: 4px;
-			}
-			.library-cards {
-				display: grid;
-				grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
-				gap: 12px;
-				margin-top: 12px;
 			}
 			.song.compact {
 				padding: 0;
@@ -289,6 +285,7 @@
 				.library-grid {
 					grid-template-columns: 1fr;
 				}
+				.song-list,
 				.library-cards {
 					grid-template-columns: repeat(2, minmax(0, 1fr));
 				}
@@ -702,7 +699,7 @@
 
 				playlistEl.innerHTML = "";
 				for (const song of playlist.slice(0, 20)) {
-					playlistEl.append(renderSongCard(song, false));
+					playlistEl.append(renderSongCard(song, true));
 				}
 
 				requestsEl.innerHTML = "";
@@ -806,26 +803,27 @@
 
 			function renderSongCard(song, includeTags = false) {
 				const item = document.createElement("article");
-				item.className = "song";
-				if (includeTags) item.classList.add("compact");
-				if (includeTags) {
-					const cover = document.createElement("div");
-					cover.className = "cover";
-					if (song.cover_art_object_key) {
-						const img = document.createElement("img");
-						img.src = `/api/radio/cover/${song.id}?v=${song.cover_art_created_at || song.completed_at || Date.now()}`;
-						img.alt = "";
-						img.loading = "lazy";
-						cover.append(img);
-					} else {
-						const fallback = document.createElement("div");
-						fallback.className = "cover-fallback";
-						cover.append(fallback);
-					}
-					item.append(cover);
+				item.className = "song compact";
+				const cover = document.createElement("div");
+				cover.className = "cover";
+				const fallback = document.createElement("div");
+				fallback.className = "cover-fallback";
+				if (song.id) {
+					const img = document.createElement("img");
+					img.src = `/api/radio/cover/${song.id}?v=${song.cover_art_created_at || song.completed_at || Date.now()}`;
+					img.alt = "";
+					img.loading = "lazy";
+					img.addEventListener("error", () => {
+						img.remove();
+						if (!cover.contains(fallback)) cover.append(fallback);
+					});
+					cover.append(img);
+				} else {
+					cover.append(fallback);
 				}
-				const body = document.createElement(includeTags ? "div" : "section");
-				body.className = includeTags ? "song-body" : "";
+				item.append(cover);
+				const body = document.createElement("div");
+				body.className = "song-body";
 				const title = document.createElement("div");
 				title.className = "song-title";
 				title.textContent = song.title || "Untitled Signal";
