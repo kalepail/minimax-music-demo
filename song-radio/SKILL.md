@@ -40,7 +40,7 @@ When asked to keep a station filled:
    - Run a text model to turn that brief into a compact, vivid MiniMax prompt plus original lyrics.
    - Call the music model with explicit lyrics so the UI can later show what was used.
    - Stream the returned audio URL into R2.
-   - Generate square cover art with a Workers AI text-to-image model and store it in R2.
+   - Generate square cover art with a Workers AI text-to-image model and store it in R2. Rotate between supported models for variety, and keep the prompt visual-only so model attention stays on scene/color/texture instead of written language.
    - Store a small metadata JSON record in R2.
    - Insert or update a D1 catalog row and tag rows.
    - Notify the station Durable Object so the playlist updates.

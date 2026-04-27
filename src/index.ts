@@ -8,7 +8,7 @@ import {
 	RADIO_MAX_FULFILLED_REQUESTS,
 	RADIO_MAX_PLAYLIST,
 	RADIO_MAX_REQUESTS,
-	RADIO_COVER_MODEL,
+	RADIO_COVER_MODELS,
 	RADIO_MUSIC_MODEL,
 	RADIO_STATION_ID,
 	RADIO_TARGET_BACKLOG,
@@ -57,25 +57,7 @@ import {
 	type StoredAudioRange,
 } from "./lib";
 
-const COVER_NEGATIVE_PROMPT = [
-	"text",
-	"letters",
-	"words",
-	"numbers",
-	"typography",
-	"font",
-	"title",
-	"caption",
-	"label",
-	"logo",
-	"watermark",
-	"signature",
-	"poster text",
-	"album title",
-	"artist name",
-	"readable symbols",
-	"hieroglyphic writing",
-].join(", ");
+const COVER_PROMPT_PREFIX = "Square visual artwork inspired by an AI radio song.";
 
 export class MusicJob extends DurableObject<Env> {
 	async start(input: MusicInput, jobId: string): Promise<void> {
@@ -1270,10 +1252,10 @@ async function backfillCoverArt(env: Env, limit: number, regenerate = false): Pr
 			format, audio_object_key, metadata_object_key, audio_content_type, primary_genre, mood, energy, bpm_min, bpm_max, vocal_style,
 			created_at, completed_at, duration_ms
 		 FROM songs
-		 WHERE cover_art_object_key IS NULL OR cover_art_object_key = '' OR cover_art_model IS NULL OR cover_art_model != ? OR ? = 1
+		 WHERE cover_art_object_key IS NULL OR cover_art_object_key = '' OR cover_art_prompt IS NULL OR cover_art_prompt NOT LIKE ? OR ? = 1
 		 ORDER BY completed_at DESC
 		 LIMIT ?`,
-	).bind(RADIO_COVER_MODEL, regenerate ? 1 : 0, limit).all<SongRow>();
+	).bind(`${COVER_PROMPT_PREFIX}%`, regenerate ? 1 : 0, limit).all<SongRow>();
 
 	const songs = (rows.results ?? []).map((row) => songFromRow(row, []));
 	let generated = 0;
@@ -1298,19 +1280,12 @@ async function backfillCoverArt(env: Env, limit: number, regenerate = false): Pr
 }
 
 async function generateAndAttachCoverArt(env: Env, song: RadioSong, regenerate = false): Promise<void> {
-	if (song.cover_art_object_key && song.cover_art_model === RADIO_COVER_MODEL && !regenerate) return;
+	if (song.cover_art_object_key && !regenerate) return;
+	const model = coverModelForSong(song.id);
 	const prompt = coverArtPrompt(song);
 	const response = await env.AI.run(
-		RADIO_COVER_MODEL,
-		{
-			prompt,
-			negative_prompt: COVER_NEGATIVE_PROMPT,
-			num_steps: 8,
-			guidance: 8.5,
-			width: 1024,
-			height: 1024,
-			seed: hashString(song.id),
-		},
+		model,
+		coverModelInput(model, prompt, hashString(song.id)),
 		{
 			gateway: {
 				id: env.AI_GATEWAY_ID,
@@ -1329,13 +1304,13 @@ async function generateAndAttachCoverArt(env: Env, song: RadioSong, regenerate =
 			contentType: "image/jpeg",
 		},
 		customMetadata: {
-			model: RADIO_COVER_MODEL,
+			model,
 			song_id: song.id,
 		},
 	});
 	song.cover_art_object_key = key;
 	song.cover_art_prompt = prompt;
-	song.cover_art_model = RADIO_COVER_MODEL;
+	song.cover_art_model = model;
 	song.cover_art_created_at = Date.now();
 }
 
@@ -1357,7 +1332,29 @@ function coverArtPrompt(song: RadioSong): string {
 	const tags = song.tags.length > 0 ? song.tags.slice(0, 5).join(", ") : "experimental radio";
 	const genre = song.primary_genre ?? "genre-fluid pop";
 	const mood = song.mood ?? "cinematic";
-	return `Square text-free visual artwork for an AI radio song. Do not include or imply any written title. ${genre}, ${mood}, ${tags}. Visualize the sound world as pure imagery: ${song.prompt.slice(0, 360)}. Bold editorial music artwork, tactile texture, striking central composition, rich color contrast, no poster layout, no packaging mockup, no blank label area. Absolutely no text of any kind in the image: no words, no letters, no numbers, no readable symbols, no typography, no captions, no labels, no logos, no artist names, no UI, no watermark, no signature.`;
+	return `${COVER_PROMPT_PREFIX} ${genre}, ${mood}, ${tags}. Use scene, color, lighting, texture, characters, objects, landscape, architecture, pattern, and motion. Visual inspiration: ${song.prompt.slice(0, 300)}. Bold editorial music-art feeling, tactile texture, striking central composition, rich color contrast, layered depth, handmade detail, frame filled edge-to-edge with continuous visual detail.`;
+}
+
+function coverModelForSong(songId: string): typeof RADIO_COVER_MODELS[number] {
+	return RADIO_COVER_MODELS[hashString(songId) % RADIO_COVER_MODELS.length];
+}
+
+function coverModelInput(model: string, prompt: string, seed: number): Record<string, unknown> {
+	if (model === "@cf/bytedance/stable-diffusion-xl-lightning") {
+		return {
+			prompt,
+			num_steps: 8,
+			guidance: 7,
+			width: 1024,
+			height: 1024,
+			seed,
+		};
+	}
+	return {
+		prompt,
+		steps: 4,
+		seed,
+	};
 }
 
 async function extractImageBytes(value: unknown): Promise<Uint8Array | undefined> {

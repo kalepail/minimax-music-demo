@@ -191,7 +191,11 @@ export const RADIO_IN_FLIGHT_STALE_MS = 45 * 60 * 1000;
 export const RADIO_MAX_QUEUE_ATTEMPTS = 3;
 export const RADIO_TEXT_MODEL = "@cf/meta/llama-3.1-8b-instruct-fast";
 export const RADIO_MUSIC_MODEL = "minimax/music-2.6";
-export const RADIO_COVER_MODEL = "@cf/bytedance/stable-diffusion-xl-lightning";
+export const RADIO_COVER_MODELS = [
+	"@cf/black-forest-labs/flux-1-schnell",
+	"@cf/bytedance/stable-diffusion-xl-lightning",
+] as const;
+export const RADIO_COVER_MODEL = RADIO_COVER_MODELS[0];
 export const LIBRARY_MAX_LIMIT = 100;
 export const LIBRARY_DEFAULT_LIMIT = 25;
 
