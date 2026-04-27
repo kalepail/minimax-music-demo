@@ -9,6 +9,8 @@ export type RadioRequest = {
 	id: string;
 	text: string;
 	created_at: number;
+	assigned_song_id?: string;
+	assigned_at?: number;
 };
 
 export type RadioInFlight = {

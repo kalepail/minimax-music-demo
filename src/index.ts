@@ -284,23 +284,38 @@ export class RadioStation extends DurableObject<Env> {
 
 	async fill(target = RADIO_TARGET_BACKLOG, stationId = RADIO_STATION_ID, genre?: string): Promise<number> {
 		const now = Date.now();
-		const requests = [...(await this.requests())];
-		const freshInFlight = (await this.inFlight()).filter((item) => now - item.queued_at < RADIO_IN_FLIGHT_STALE_MS);
+		let requests = [...(await this.requests())];
+		const existingInFlight = await this.inFlight();
+		const freshInFlight = existingInFlight.filter((item) => now - item.queued_at < RADIO_IN_FLIGHT_STALE_MS);
+		const staleInFlight = existingInFlight.filter((item) => now - item.queued_at >= RADIO_IN_FLIGHT_STALE_MS);
+		for (const item of staleInFlight) {
+			requests = releaseRequestAssignment(requests, item);
+		}
+		requests = releaseOrphanedAssignments(requests, freshInFlight);
 		const needed = Math.max(0, target - freshInFlight.length);
 		if (needed === 0) {
-			if (freshInFlight.length !== (await this.inFlight()).length) {
-				await this.ctx.storage.put("in_flight", freshInFlight);
-			}
+			await Promise.all([
+				this.ctx.storage.put("in_flight", freshInFlight),
+				this.ctx.storage.put("requests", requests),
+			]);
 			return 0;
 		}
 
 		const nextInFlight = [...freshInFlight];
 		const messages: MessageSendRequest<RadioGenerateMessage>[] = [];
 		for (let i = 0; i < needed; i++) {
-			const request = requests.shift();
+			const requestIndex = requests.findIndex((item) => !item.assigned_song_id);
+			const request = requestIndex >= 0 ? requests[requestIndex] : undefined;
 			const songId = crypto.randomUUID();
 			const queuedAt = Date.now();
 			const creative = creativeDirection(songId, i, genre, request?.text);
+			if (request && requestIndex >= 0) {
+				requests[requestIndex] = {
+					...request,
+					assigned_song_id: songId,
+					assigned_at: queuedAt,
+				};
+			}
 			const body: RadioGenerateMessage = {
 				song_id: songId,
 				station_id: stationId,
@@ -338,14 +353,19 @@ export class RadioStation extends DurableObject<Env> {
 		const existingInFlight = await this.inFlight();
 		const completedInFlight = existingInFlight.find((item) => item.song_id === song.id);
 		const inFlight = existingInFlight.filter((item) => item.song_id !== song.id);
+		const requests = await this.requests();
 		const fulfilled = await this.fulfilledRequests();
 		const fulfilledRequest = requestFulfillment(song, completedInFlight);
 		const nextFulfilled = fulfilledRequest
 			? [fulfilledRequest, ...fulfilled.filter((item) => item.id !== fulfilledRequest.id)].slice(0, RADIO_MAX_FULFILLED_REQUESTS)
 			: fulfilled;
+		const nextRequests = fulfilledRequest
+			? requests.filter((item) => item.id !== fulfilledRequest.id)
+			: requests;
 		await Promise.all([
 			this.ctx.storage.put("playlist", playlist),
 			this.ctx.storage.put("in_flight", inFlight),
+			this.ctx.storage.put("requests", nextRequests),
 			this.ctx.storage.put("fulfilled_requests", nextFulfilled),
 		]);
 	}
@@ -360,7 +380,7 @@ export class RadioStation extends DurableObject<Env> {
 		const failed = existingInFlight.find((item) => item.song_id === songId);
 		const inFlight = existingInFlight.filter((item) => item.song_id !== songId);
 		const requests = failed?.request_id && failed.request_text
-			? requeueRequest(await this.requests(), failed)
+			? releaseRequestAssignment(await this.requests(), failed)
 			: await this.requests();
 		await Promise.all([
 			this.ctx.storage.put("in_flight", inFlight),
@@ -432,6 +452,33 @@ function requestFulfillment(song: RadioSong, inFlight?: RadioInFlight): Fulfille
 		song_id: song.id,
 		song_title: song.title,
 	};
+}
+
+function releaseOrphanedAssignments(requests: RadioRequest[], inFlight: RadioInFlight[]): RadioRequest[] {
+	const activeRequestIds = new Set(inFlight.map((item) => item.request_id).filter((id): id is string => typeof id === "string"));
+	return requests.map((request) => {
+		if (!request.assigned_song_id || activeRequestIds.has(request.id)) return request;
+		return {
+			id: request.id,
+			text: request.text,
+			created_at: request.created_at,
+		};
+	});
+}
+
+function releaseRequestAssignment(requests: RadioRequest[], inFlight: RadioInFlight): RadioRequest[] {
+	if (!inFlight.request_id || !inFlight.request_text) return requests;
+	let found = false;
+	const released = requests.map((request) => {
+		if (request.id !== inFlight.request_id) return request;
+		found = true;
+		return {
+			id: request.id,
+			text: request.text,
+			created_at: request.created_at,
+		};
+	});
+	return found ? released : requeueRequest(released, inFlight);
 }
 
 function requeueRequest(requests: RadioRequest[], inFlight: RadioInFlight): RadioRequest[] {
@@ -1211,7 +1258,7 @@ function coverArtPrompt(song: RadioSong): string {
 	const tags = song.tags.length > 0 ? song.tags.slice(0, 5).join(", ") : "experimental radio";
 	const genre = song.primary_genre ?? "genre-fluid pop";
 	const mood = song.mood ?? "cinematic";
-	return `Square album cover artwork for an AI radio song titled "${song.title}". ${genre}, ${mood}, ${tags}. Visualize the sound world: ${song.prompt.slice(0, 420)}. Bold editorial music artwork, tactile texture, striking central composition, rich color contrast, no words, no typography, no logos, no artist names, no UI, no watermark.`;
+	return `Square album cover artwork for an AI radio song titled "${song.title}". ${genre}, ${mood}, ${tags}. Visualize the sound world: ${song.prompt.slice(0, 420)}. Bold editorial music artwork, tactile texture, striking central composition, rich color contrast. Absolutely no text of any kind in the image: no words, no letters, no numbers, no readable symbols, no typography, no captions, no labels, no logos, no artist names, no UI, no watermark, no signature.`;
 }
 
 function extractBase64Image(value: unknown): string | undefined {
