@@ -1515,9 +1515,42 @@ function distinctRadioTitle(title: string, recentTitles: string[], message: Radi
 	const isGeneric = ["echoflux", "open frequency", "untitled signal", "signal drift"].includes(lower);
 	const isOneWord = normalized.split(/\s+/).length < 2;
 	if (!isRecent && !isGeneric && !isOneWord) return normalized.slice(0, 120);
-	const suffix = titleCaseWords(seedWord(message.creative_seed, isRecent ? 1 : 0));
-	const expanded = `${normalized} ${suffix}`;
+	const suffix = titleSuffix(normalized, recentTitles, message);
+	const expanded = `${normalized} ${suffix}`.replace(/\b(\w+)\s+\1\b/gi, "$1");
 	return expanded.slice(0, 120);
+}
+
+function titleSuffix(title: string, recentTitles: string[], message: RadioGenerateMessage): string {
+	const titleWords = new Set(title.toLowerCase().split(/\s+/).filter(Boolean));
+	const suffixes = [
+		seedWord(message.creative_seed, 0),
+		seedWord(message.creative_seed, 1),
+		...[
+			"afterglow",
+			"parallax",
+			"voltage",
+			"mirage",
+			"overpass",
+			"lantern",
+			"cascade",
+			"velvet",
+			"satellite",
+			"bloom",
+			"cipher",
+			"harbor",
+			"fever",
+			"orbit",
+			"prism",
+			"ritual",
+		].map((value, index) => pick([value], message.song_id, index)),
+	];
+	for (const candidate of suffixes) {
+		const clean = candidate.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+		if (!clean || titleWords.has(clean)) continue;
+		const expanded = `${title} ${titleCaseWords(clean)}`.toLowerCase();
+		if (!recentTitles.some((recent) => recent.toLowerCase() === expanded)) return titleCaseWords(clean);
+	}
+	return `Signal ${message.song_id.slice(0, 4).toUpperCase()}`;
 }
 
 function makePromptUnique(prompt: string, uniqueness: string, recentPrompts: string[]): string {
