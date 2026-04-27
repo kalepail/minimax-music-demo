@@ -57,8 +57,26 @@ import {
 	type StoredAudioRange,
 } from "./lib";
 
-const COVER_PROMPT_PREFIX = "Square pictorial cover art for an AI radio song v3.";
+const COVER_PROMPT_PREFIX = "Square pictorial music image v4.";
 const RECENT_CONTEXT_LIMIT = 30;
+const PROMPT_PLAN_RESPONSE_FORMAT = {
+	type: "json_schema",
+	json_schema: {
+		type: "object",
+		properties: {
+			title: { type: "string" },
+			prompt: { type: "string" },
+			primary_genre: { type: "string" },
+			tags: { type: "array", items: { type: "string" } },
+			mood: { type: "string" },
+			energy: { type: "number" },
+			bpm_min: { type: "number" },
+			bpm_max: { type: "number" },
+			vocal_style: { type: "string" },
+		},
+		required: ["title", "prompt"],
+	},
+} as const;
 
 export class MusicJob extends DurableObject<Env> {
 	async start(input: MusicInput, jobId: string): Promise<void> {
@@ -1387,20 +1405,20 @@ async function updateSongCoverArt(db: D1Database, song: RadioSong): Promise<void
 }
 
 function coverArtPrompt(song: RadioSong): string {
-	const tags = visualSafeTags(song.tags).join(", ") || "experimental radio";
+	const tags = visualSafeTags(song.tags).join(", ") || "experimental music";
 	const genre = song.primary_genre ?? "genre-fluid pop";
 	const mood = song.mood ?? "cinematic";
 	const direction = sanitizeCoverFragment(song.creative_axis ?? song.vocal_style ?? "");
-	return `${COVER_PROMPT_PREFIX} ${genre}, ${mood}, ${tags}. ${direction ? `Visual direction: ${direction}.` : ""} Use scene, color, lighting, texture, characters, objects, landscape, architecture, abstract pattern, and motion. Purely pictorial image: blank surfaces, abstract marks only, no readable characters, no signage, no captions, no logos, no numerals, no album-title typography, no watermark, no written language. Bold editorial music-art feeling, tactile texture, striking central composition, rich color contrast, layered depth, handmade detail, frame filled edge-to-edge with continuous visual detail.`;
+	return `${COVER_PROMPT_PREFIX} ${genre}, ${mood}, ${tags}. ${direction ? `Visual direction: ${direction}.` : ""} Focus on scene, color, lighting, texture, characters, landscape, architecture, abstract pattern, and motion. Use blank unmarked surfaces and purely pictorial shapes. Avoid devices, cassettes, posters, signage, labels, logos, watermarks, letters, numerals, and readable symbols. Bold editorial feeling, tactile texture, striking central composition, rich color contrast, layered depth, handmade detail, frame filled edge-to-edge with continuous visual detail.`;
 }
 
 function visualSafeTags(tags: string[]): string[] {
-	const blocked = /\b(text|typography|letter|word|lyric|caption|sign|signage|logo|label|title|glyph|hieroglyph|alphabet|number|poster|newspaper|book|page|banner|watermark)\b/i;
+	const blocked = /\b(text|typography|letter|word|lyric|caption|sign|signage|logo|label|title|glyph|hieroglyph|alphabet|number|poster|newspaper|book|page|banner|watermark|radio|cassette|tape|album|cover)\b/i;
 	return tags.filter((tag) => !blocked.test(tag)).slice(0, 5);
 }
 
 function sanitizeCoverFragment(value: string): string {
-	const blocked = /\b(text|typography|letter|word|lyric|caption|sign|signage|logo|label|title|glyph|hieroglyph|alphabet|number|poster|newspaper|book|page|banner|watermark)\b/gi;
+	const blocked = /\b(text|typography|letter|word|lyric|caption|sign|signage|logo|label|title|glyph|hieroglyph|alphabet|number|poster|newspaper|book|page|banner|watermark|radio|cassette|tape|album|cover)\b/gi;
 	return value.replace(/["'`]/g, "").replace(blocked, "abstract motif").replace(/\s+/g, " ").trim().slice(0, 180);
 }
 
@@ -1511,6 +1529,7 @@ ${recentPromptInstruction}
 Create one surprising station-ready song concept. The final prompt must include the non-repeatable recipe as concrete musical instructions, not as a token or ID. Avoid references to specific copyrighted songs or direct artist imitation. Do not use generic titles like Echoflux, Open Frequency, Untitled Signal, or Signal Drift. Keep the prompt under 1200 characters. Add useful genre/tags/mood metadata for library filtering.`,
 				},
 			],
+			response_format: PROMPT_PLAN_RESPONSE_FORMAT,
 		},
 		{
 			gateway: {
@@ -1522,9 +1541,8 @@ Create one surprising station-ready song concept. The final prompt must include 
 		},
 	);
 
-	const text = extractTextResponse(response);
-	if (!text) return fallback;
-	const parsed = parsePromptPlan(text);
+	const parsed = parsePromptPlanResponse(response);
+	if (!parsed.prompt && !parsed.title) return fallback;
 	const title = distinctRadioTitle(parsed.title || fallback.title, recentTitles, message);
 	const prompt = makePromptUnique(parsed.prompt || fallback.prompt, uniqueness, recent.map((item) => item.prompt));
 	return {
@@ -1725,7 +1743,7 @@ function fallbackRadioPrompt(message: RadioGenerateMessage): RadioPromptPlan {
 		title,
 		prompt: `${seed} ${message.genre ? `Shape it for ${message.genre} radio.` : ""} Creative seed: ${message.creative_seed}. Contrast axis: ${message.creative_axis}. Tempo center: ${message.creative_bpm} BPM. Make a polished, original 2-3 minute song with a strong hook, clear genre fusion, specific instrumentation, vocal direction, production texture, rhythmic motion, and emotional arc. Include an ear-catching intro, a memorable chorus, a dynamic bridge, and a satisfying outro. Avoid direct artist imitation and avoid quoting existing songs.`,
 		primary_genre: genre,
-		tags: normalizeTags([genre, "ai radio", message.creative_axis, request ?? "original"]),
+		tags: normalizeTags([genre]),
 		mood: "surprising",
 		energy: 7,
 		bpm_min: Math.max(40, message.creative_bpm - 8),
@@ -1780,23 +1798,79 @@ function titleFromRequest(request: string): string {
 	return words.length > 0 ? words.map((word) => word[0]?.toUpperCase() + word.slice(1)).join(" ") : "Listener Signal";
 }
 
+function parsePromptPlanResponse(response: unknown): Partial<RadioPromptPlan> & { tags: string[] } {
+	const objectResponse = response && typeof response === "object" ? response as Record<string, unknown> : undefined;
+	if (objectResponse) {
+		const candidate = objectResponse.response && typeof objectResponse.response === "object"
+			? objectResponse.response as Record<string, unknown>
+			: objectResponse;
+		const parsed = parsePromptPlanObject(candidate);
+		if (parsed.prompt || parsed.title) return parsed;
+	}
+	const text = extractTextResponse(response);
+	return text ? parsePromptPlan(text) : { tags: [] };
+}
+
 function parsePromptPlan(text: string): Partial<RadioPromptPlan> & { tags: string[] } {
 	const trimmed = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
 	try {
-		const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-		return {
-			title: typeof parsed.title === "string" ? parsed.title.trim().slice(0, 120) : undefined,
-			prompt: typeof parsed.prompt === "string" ? parsed.prompt.trim().slice(0, 2000) : undefined,
-			lyrics: typeof parsed.lyrics === "string" ? parsed.lyrics.trim().slice(0, 3500) : undefined,
-			primary_genre: normalizeFacet(parsed.primary_genre),
-			tags: normalizeTags(parsed.tags),
-			mood: normalizeFacet(parsed.mood),
-			energy: normalizeBoundedInt(parsed.energy, 1, 10),
-			bpm_min: normalizeBoundedInt(parsed.bpm_min, 40, 240),
-			bpm_max: normalizeBoundedInt(parsed.bpm_max, 40, 240),
-			vocal_style: typeof parsed.vocal_style === "string" ? parsed.vocal_style.trim().slice(0, 160) : undefined,
-		};
+		return parsePromptPlanObject(JSON.parse(trimmed) as Record<string, unknown>);
 	} catch {
-		return { prompt: trimmed.slice(0, 2000), tags: [] };
+		const loose = parseLoosePromptPlan(trimmed);
+		return loose.prompt || loose.title ? loose : { tags: [] };
 	}
+}
+
+function parsePromptPlanObject(parsed: Record<string, unknown>): Partial<RadioPromptPlan> & { tags: string[] } {
+	return {
+		title: typeof parsed.title === "string" ? parsed.title.trim().slice(0, 120) : undefined,
+		prompt: typeof parsed.prompt === "string" ? parsed.prompt.trim().slice(0, 2000) : undefined,
+		lyrics: typeof parsed.lyrics === "string" ? parsed.lyrics.trim().slice(0, 3500) : undefined,
+		primary_genre: normalizeFacet(parsed.primary_genre),
+		tags: normalizeTags(parsed.tags).filter((tag) => tag !== "ai radio" && tag !== "original"),
+		mood: normalizeFacet(parsed.mood),
+		energy: normalizeBoundedInt(parsed.energy, 1, 10),
+		bpm_min: normalizeBoundedInt(parsed.bpm_min, 40, 240),
+		bpm_max: normalizeBoundedInt(parsed.bpm_max, 40, 240),
+		vocal_style: typeof parsed.vocal_style === "string" ? parsed.vocal_style.trim().slice(0, 160) : undefined,
+	};
+}
+
+function parseLoosePromptPlan(text: string): Partial<RadioPromptPlan> & { tags: string[] } {
+	return {
+		title: looseStringField(text, "title", ["prompt", "primary_genre", "tags", "mood", "energy", "bpm_min", "bpm_max", "vocal_style"])?.slice(0, 120),
+		prompt: looseStringField(text, "prompt", ["primary_genre", "tags", "mood", "energy", "bpm_min", "bpm_max", "vocal_style"])?.slice(0, 2000),
+		primary_genre: normalizeFacet(looseStringField(text, "primary_genre", ["tags", "mood", "energy", "bpm_min", "bpm_max", "vocal_style"])),
+		tags: normalizeTags(looseArrayField(text, "tags")).filter((tag) => tag !== "ai radio" && tag !== "original"),
+		mood: normalizeFacet(looseStringField(text, "mood", ["energy", "bpm_min", "bpm_max", "vocal_style"])),
+		energy: normalizeBoundedInt(looseNumberField(text, "energy"), 1, 10),
+		bpm_min: normalizeBoundedInt(looseNumberField(text, "bpm_min"), 40, 240),
+		bpm_max: normalizeBoundedInt(looseNumberField(text, "bpm_max"), 40, 240),
+		vocal_style: looseStringField(text, "vocal_style", [])?.slice(0, 160),
+	};
+}
+
+function looseStringField(text: string, field: string, nextFields: string[]): string | undefined {
+	const start = text.search(new RegExp(`"${field}"\\s*:\\s*"`));
+	if (start < 0) return undefined;
+	const valueStart = text.indexOf("\"", text.indexOf(":", start)) + 1;
+	if (valueStart <= 0) return undefined;
+	const nextPattern = nextFields.length > 0 ? new RegExp(`"\\s*,\\s*"(${nextFields.join("|")})"\\s*:`) : /\s*"\s*[,}]\s*$/;
+	const rest = text.slice(valueStart);
+	const next = rest.search(nextPattern);
+	const raw = next >= 0 ? rest.slice(0, next) : rest.replace(/"\s*}\s*$/, "");
+	return raw.replace(/\\"/g, "\"").replace(/\\n/g, "\n").trim();
+}
+
+function looseArrayField(text: string, field: string): string[] {
+	const match = new RegExp(`"${field}"\\s*:\\s*\\[([\\s\\S]*?)\\]`).exec(text);
+	if (!match) return [];
+	return [...match[1].matchAll(/"([^"]+)"/g)].map((item) => item[1]);
+}
+
+function looseNumberField(text: string, field: string): number | undefined {
+	const match = new RegExp(`"${field}"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)`).exec(text);
+	if (!match) return undefined;
+	const value = Number(match[1]);
+	return Number.isFinite(value) ? value : undefined;
 }
