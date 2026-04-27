@@ -1280,9 +1280,9 @@ async function backfillCoverArt(env: Env, limit: number, regenerate = false): Pr
 }
 
 async function generateAndAttachCoverArt(env: Env, song: RadioSong, regenerate = false): Promise<void> {
-	if (song.cover_art_object_key && !regenerate) return;
-	const model = coverModelForSong(song.id);
 	const prompt = coverArtPrompt(song);
+	if (song.cover_art_object_key && song.cover_art_prompt?.startsWith(COVER_PROMPT_PREFIX) && !regenerate) return;
+	const model = coverModelForSong(song.id);
 	const response = await env.AI.run(
 		model,
 		coverModelInput(model, prompt, hashString(song.id)),
