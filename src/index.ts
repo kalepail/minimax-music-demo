@@ -1252,10 +1252,10 @@ async function backfillCoverArt(env: Env, limit: number, regenerate = false): Pr
 			format, audio_object_key, metadata_object_key, audio_content_type, primary_genre, mood, energy, bpm_min, bpm_max, vocal_style,
 			created_at, completed_at, duration_ms
 		 FROM songs
-		 WHERE cover_art_object_key IS NULL OR cover_art_object_key = '' OR cover_art_prompt IS NULL OR cover_art_prompt NOT LIKE ? OR ? = 1
+		 WHERE cover_art_object_key IS NULL OR cover_art_object_key = '' OR cover_art_prompt IS NULL OR substr(cover_art_prompt, 1, ?) != ? OR ? = 1
 		 ORDER BY completed_at DESC
 		 LIMIT ?`,
-	).bind(`${COVER_PROMPT_PREFIX}%`, regenerate ? 1 : 0, limit).all<SongRow>();
+	).bind(COVER_PROMPT_PREFIX.length, COVER_PROMPT_PREFIX, regenerate ? 1 : 0, limit).all<SongRow>();
 
 	const songs = (rows.results ?? []).map((row) => songFromRow(row, []));
 	let generated = 0;
