@@ -415,6 +415,7 @@
 					<div class="station-bar">
 						<span class="pill" id="radioCount">songs=0</span>
 						<span class="pill" id="radioInflight">in_flight=0</span>
+						<span class="pill" id="radioRequests">requests=0</span>
 						<span class="pill" id="radioTarget">target=10</span>
 					</div>
 					<audio id="stationPlayer" controls preload="none"></audio>
@@ -484,6 +485,7 @@
 			const nowPlayingDetailsEl = document.getElementById("nowPlayingDetails");
 			const radioCountEl = document.getElementById("radioCount");
 			const radioInflightEl = document.getElementById("radioInflight");
+			const radioRequestsEl = document.getElementById("radioRequests");
 			const radioTargetEl = document.getElementById("radioTarget");
 			const playlistEl = document.getElementById("playlist");
 			const fillRadioButton = document.getElementById("fillRadio");
@@ -571,7 +573,7 @@
 					});
 					const data = await res.json();
 					if (!res.ok) throw new Error(data.error || `fill failed: ${res.status}`);
-					radioStatusEl.textContent = `queued=${data.queued} target=${data.target}`;
+					radioStatusEl.textContent = `generation jobs added=${data.generation_jobs_queued ?? data.queued} target=${data.target}`;
 					await loadRadio();
 				} catch (err) {
 					radioFail(err && err.message ? err.message : String(err));
@@ -595,7 +597,7 @@
 					const data = await res.json();
 					if (!res.ok) throw new Error(data.error || `request failed: ${res.status}`);
 					radioPromptEl.value = "";
-					radioStatusEl.textContent = `request saved queued=${data.queued}`;
+					radioStatusEl.textContent = `request saved · generation jobs added=${data.generation_jobs_queued ?? data.queued} · pending requests=${data.pending_requests ?? "?"}`;
 					await loadRadio();
 				} catch (err) {
 					radioFail(err && err.message ? err.message : String(err));
@@ -740,6 +742,7 @@
 				const inFlight = Array.isArray(data.in_flight) ? data.in_flight : [];
 				radioCountEl.textContent = `songs=${playlist.length}`;
 				radioInflightEl.textContent = `in_flight=${inFlight.length}`;
+				radioRequestsEl.textContent = `requests=${requests.length}`;
 				radioTargetEl.textContent = `target=${data.target_backlog ?? 10}`;
 
 				if (!stationPlayer.dataset.songId && playlist[0]) {

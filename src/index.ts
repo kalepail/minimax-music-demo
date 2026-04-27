@@ -291,7 +291,7 @@ export class RadioStation extends DurableObject<Env> {
 		};
 	}
 
-	async request(text: string, stationId = RADIO_STATION_ID, genre?: string): Promise<{ request: RadioRequest; queued: number }> {
+	async request(text: string, stationId = RADIO_STATION_ID, genre?: string): Promise<{ request: RadioRequest; queued: number; generation_jobs_queued: number; pending_requests: number; assigned_requests: number }> {
 		const request: RadioRequest = {
 			id: crypto.randomUUID(),
 			text,
@@ -300,7 +300,14 @@ export class RadioStation extends DurableObject<Env> {
 		const requests = [request, ...(await this.requests())].slice(0, RADIO_MAX_REQUESTS);
 		await this.ctx.storage.put("requests", requests);
 		const queued = await this.fill(RADIO_TARGET_BACKLOG, stationId, genre);
-		return { request, queued };
+		const pending = await this.requests();
+		return {
+			request,
+			queued,
+			generation_jobs_queued: queued,
+			pending_requests: pending.length,
+			assigned_requests: pending.filter((item) => item.assigned_song_id).length,
+		};
 	}
 
 	async fill(target = RADIO_TARGET_BACKLOG, stationId = RADIO_STATION_ID, genre?: string): Promise<number> {
@@ -751,7 +758,7 @@ async function handleRadioFill(request: Request, env: Env): Promise<Response> {
 	const station = parseStationParams(new URL(request.url), body);
 	if ("error" in station) return json(station, 400);
 	const queued = await radioStation(env, station.station_id).fill(target, station.station_id, station.genre);
-	return json({ queued, target, station_id: station.station_id, genre: station.genre }, queued > 0 ? 202 : 200);
+	return json({ queued, generation_jobs_queued: queued, target, station_id: station.station_id, genre: station.genre }, queued > 0 ? 202 : 200);
 }
 
 async function handleRadioStations(env: Env): Promise<Response> {
