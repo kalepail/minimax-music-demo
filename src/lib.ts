@@ -39,6 +39,13 @@ export type StoredAudioObject = Pick<
 	"body" | "httpEtag" | "httpMetadata" | "range" | "size" | "writeHttpMetadata"
 >;
 
+export type StoredAudioRange = {
+	end: number;
+	r2Range: R2Range;
+	start: number;
+	total: number;
+};
+
 export type RateLimitRecord = {
 	window_start: number;
 	count: number;
@@ -201,55 +208,69 @@ export function audioResponseHeaders(record: JobRecord, upstream: Response): Hea
 	return headers;
 }
 
-export function storedAudioResponseHeaders(record: JobRecord, object: StoredAudioObject): Headers {
+export function parseRangeHeader(value: string | null, totalSize: number): StoredAudioRange | { error: "invalid" | "unsatisfiable" } | undefined {
+	if (!value) return undefined;
+	const match = /^bytes=(\d*)-(\d*)$/.exec(value.trim());
+	if (!match) return { error: "invalid" };
+
+	const [, rawStart, rawEnd] = match;
+	if (!rawStart && !rawEnd) return { error: "invalid" };
+
+	if (!rawStart) {
+		const suffix = Number(rawEnd);
+		if (!Number.isSafeInteger(suffix) || suffix <= 0) return { error: "invalid" };
+		if (totalSize <= 0) return { error: "unsatisfiable" };
+		const length = Math.min(suffix, totalSize);
+		const start = totalSize - length;
+		return {
+			end: totalSize - 1,
+			r2Range: { suffix: length },
+			start,
+			total: totalSize,
+		};
+	}
+
+	const start = Number(rawStart);
+	const explicitEnd = rawEnd ? Number(rawEnd) : undefined;
+	if (!Number.isSafeInteger(start) || start < 0) return { error: "invalid" };
+	if (explicitEnd !== undefined && (!Number.isSafeInteger(explicitEnd) || explicitEnd < start)) {
+		return { error: "invalid" };
+	}
+	if (start >= totalSize || totalSize <= 0) return { error: "unsatisfiable" };
+
+	const end = Math.min(explicitEnd ?? totalSize - 1, totalSize - 1);
+	return {
+		end,
+		r2Range: { offset: start, length: end - start + 1 },
+		start,
+		total: totalSize,
+	};
+}
+
+export function rangeNotSatisfiableHeaders(totalSize: number): Headers {
+	const headers = new Headers();
+	headers.set("Accept-Ranges", "bytes");
+	headers.set("Content-Range", `bytes */${totalSize}`);
+	return headers;
+}
+
+export function storedAudioResponseHeaders(record: JobRecord, object: StoredAudioObject, range?: StoredAudioRange): Headers {
 	const headers = new Headers();
 	object.writeHttpMetadata(headers);
 	headers.set("Content-Type", object.httpMetadata?.contentType ?? audioContentType(record));
 	headers.set("Cache-Control", "no-store");
 	headers.set("ETag", object.httpEtag);
 	headers.set("Accept-Ranges", "bytes");
-	headers.set("Content-Length", String(storedAudioBodySize(object)));
+	headers.set("Content-Length", String(range ? range.end - range.start + 1 : object.size));
 
-	const contentRange = storedAudioContentRange(object);
-	if (contentRange) headers.set("Content-Range", contentRange);
+	if (range) headers.set("Content-Range", `bytes ${range.start}-${range.end}/${range.total}`);
 	return headers;
 }
 
-export function storedAudioStatus(object: StoredAudioObject): 200 | 206 {
-	return object.range ? 206 : 200;
+export function storedAudioStatus(range?: StoredAudioRange): 200 | 206 {
+	return range ? 206 : 200;
 }
 
 function audioContentType(record: JobRecord): string {
 	return record.audio_content_type ?? (record.input.format === "wav" ? "audio/wav" : "audio/mpeg");
-}
-
-function storedAudioBodySize(object: StoredAudioObject): number {
-	if (!object.range) return object.size;
-	const range = normalizeStoredAudioRange(object);
-	return Math.max(0, range.end - range.start + 1);
-}
-
-function storedAudioContentRange(object: StoredAudioObject): string | undefined {
-	if (!object.range || object.size === 0) return undefined;
-	const range = normalizeStoredAudioRange(object);
-	return `bytes ${range.start}-${range.end}/${object.size}`;
-}
-
-function normalizeStoredAudioRange(object: StoredAudioObject): { start: number; end: number } {
-	const size = object.size;
-	const range = object.range;
-	if (!range) return { start: 0, end: Math.max(0, size - 1) };
-
-	if ("suffix" in range) {
-		const length = Math.min(range.suffix, size);
-		const start = Math.max(0, size - length);
-		return { start, end: Math.max(start, size - 1) };
-	}
-
-	const start = Math.min(range.offset ?? 0, Math.max(0, size - 1));
-	const length = range.length ?? Math.max(0, size - start);
-	return {
-		start,
-		end: Math.min(Math.max(0, size - 1), start + Math.max(0, length - 1)),
-	};
 }

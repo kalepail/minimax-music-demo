@@ -11,6 +11,7 @@ import {
 	clientRateLimitKey,
 	extractAudioUrl,
 	isStaleRunningJob,
+	parseRangeHeader,
 	parseInput,
 	publicStatus,
 	storedAudioResponseHeaders,
@@ -219,7 +220,7 @@ describe("storedAudioResponseHeaders", () => {
 		const object = makeStoredAudioObject({ size: 10 });
 		const headers = storedAudioResponseHeaders(baseJob, object);
 
-		expect(storedAudioStatus(object)).toBe(200);
+		expect(storedAudioStatus()).toBe(200);
 		expect(headers.get("Accept-Ranges")).toBe("bytes");
 		expect(headers.get("Cache-Control")).toBe("no-store");
 		expect(headers.get("Content-Length")).toBe("10");
@@ -229,15 +230,42 @@ describe("storedAudioResponseHeaders", () => {
 	});
 
 	it("serves R2 byte ranges with partial content headers", () => {
-		const object = makeStoredAudioObject({
-			range: { offset: 2, length: 4 },
-			size: 10,
-		});
-		const headers = storedAudioResponseHeaders(baseJob, object);
+		const object = makeStoredAudioObject({ size: 10 });
+		const range = parseRangeHeader("bytes=2-5", object.size);
+		if (!range || "error" in range) throw new Error("expected valid range");
+		const headers = storedAudioResponseHeaders(baseJob, object, range);
 
-		expect(storedAudioStatus(object)).toBe(206);
+		expect(storedAudioStatus(range)).toBe(206);
 		expect(headers.get("Content-Length")).toBe("4");
 		expect(headers.get("Content-Range")).toBe("bytes 2-5/10");
+	});
+});
+
+describe("parseRangeHeader", () => {
+	it("parses bounded, open-ended, and suffix byte ranges", () => {
+		expect(parseRangeHeader("bytes=0-1023", 5000)).toEqual({
+			start: 0,
+			end: 1023,
+			total: 5000,
+			r2Range: { offset: 0, length: 1024 },
+		});
+		expect(parseRangeHeader("bytes=100-", 5000)).toEqual({
+			start: 100,
+			end: 4999,
+			total: 5000,
+			r2Range: { offset: 100, length: 4900 },
+		});
+		expect(parseRangeHeader("bytes=-500", 5000)).toEqual({
+			start: 4500,
+			end: 4999,
+			total: 5000,
+			r2Range: { suffix: 500 },
+		});
+	});
+
+	it("rejects invalid and unsatisfiable ranges", () => {
+		expect(parseRangeHeader("bytes=10-5", 100)).toEqual({ error: "invalid" });
+		expect(parseRangeHeader("bytes=100-", 100)).toEqual({ error: "unsatisfiable" });
 	});
 });
 

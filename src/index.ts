@@ -11,6 +11,8 @@ import {
 	extractAudioUrl,
 	isExpiredRateLimit,
 	json,
+	parseRangeHeader,
+	rangeNotSatisfiableHeaders,
 	isStaleRunningJob,
 	parseInput,
 	publicStatus,
@@ -22,6 +24,7 @@ import {
 	type JobRecord,
 	type MusicInput,
 	type RateLimitRecord,
+	type StoredAudioRange,
 } from "./lib";
 
 export class MusicJob extends DurableObject<Env> {
@@ -237,7 +240,7 @@ export default {
 			return handleStatus(statusMatch[1], env);
 		}
 		const audioMatch = url.pathname.match(/^\/api\/audio\/([A-Za-z0-9_-]+)$/);
-		if (audioMatch && request.method === "GET") {
+		if (audioMatch && (request.method === "GET" || request.method === "HEAD")) {
 			return handleAudio(request, audioMatch[1], env);
 		}
 
@@ -296,13 +299,26 @@ async function handleAudio(request: Request, jobId: string, env: Env): Promise<R
 	}
 
 	if (record.audio_object_key) {
-		const object = await env.AUDIO_BUCKET.get(record.audio_object_key, {
-			range: request.headers,
-		});
+		const rangeHeader = request.headers.get("Range");
+		let range: StoredAudioRange | undefined;
+		if (rangeHeader) {
+			const head = await env.AUDIO_BUCKET.head(record.audio_object_key);
+			if (!head) return json({ error: "audio not found" }, 404);
+			const parsedRange = parseRangeHeader(rangeHeader, head.size);
+			if (parsedRange && "error" in parsedRange) {
+				return new Response(null, {
+					status: 416,
+					headers: rangeNotSatisfiableHeaders(head.size),
+				});
+			}
+			range = parsedRange;
+		}
+
+		const object = await env.AUDIO_BUCKET.get(record.audio_object_key, range ? { range: range.r2Range } : undefined);
 		if (object?.body) {
-			return new Response(object.body, {
-				status: storedAudioStatus(object),
-				headers: storedAudioResponseHeaders(record, object),
+			return new Response(request.method === "HEAD" ? null : object.body, {
+				status: storedAudioStatus(range),
+				headers: storedAudioResponseHeaders(record, object, range),
 			});
 		}
 	}
@@ -315,7 +331,7 @@ async function handleAudio(request: Request, jobId: string, env: Env): Promise<R
 
 	const upstream = await fetch(record.audio_url, { headers: upstreamHeaders });
 	if (upstream.status === 416) {
-		return new Response(upstream.body, {
+		return new Response(request.method === "HEAD" ? null : upstream.body, {
 			status: 416,
 			headers: audioResponseHeaders(record, upstream),
 		});
@@ -328,7 +344,7 @@ async function handleAudio(request: Request, jobId: string, env: Env): Promise<R
 		);
 	}
 
-	return new Response(upstream.body, {
+	return new Response(request.method === "HEAD" ? null : upstream.body, {
 		status: upstream.status === 206 ? 206 : 200,
 		headers: audioResponseHeaders(record, upstream),
 	});
