@@ -553,6 +553,7 @@
 			stationGenreEl.addEventListener("change", async () => {
 				clearCurrentStation();
 				await loadRadio();
+				libraryGenreEl.value = stationGenreEl.value;
 				resetLibrary();
 				await loadLibraryPage();
 			});
@@ -766,7 +767,7 @@
 					cursor: libraryCursor,
 					sort: stationSortEl.value,
 				});
-				const genre = libraryGenreEl.value || stationGenreEl.value;
+				const genre = libraryGenreEl.value;
 				if (genre) params.set("genre", genre);
 				if (libraryTagEl.value.trim()) params.set("tag", libraryTagEl.value.trim());
 				const res = await fetch(`/api/library?${params.toString()}`);
