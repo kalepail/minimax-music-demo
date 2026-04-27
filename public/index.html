@@ -508,7 +508,7 @@
 			const POLL_TIMEOUT_MS = 15 * 60 * 1000;
 			const JOB_STORAGE_KEY = "minimax-music-demo:last-job";
 			const RADIO_REFRESH_MS = 5000;
-			const COVER_CACHE_VERSION = "cover-mix-v2";
+			const COVER_CACHE_VERSION = "cover-mix-v3";
 			let radioStatus = null;
 			let libraryCursor = "0";
 			let loadedLibrarySongs = [];
@@ -625,7 +625,11 @@
 			});
 
 			libraryGenreEl.addEventListener("change", async () => {
-				if (libraryGenreEl.value) stationGenreEl.value = libraryGenreEl.value;
+				if (stationGenreEl.value !== libraryGenreEl.value) {
+					stationGenreEl.value = libraryGenreEl.value;
+					clearCurrentStation();
+					await loadRadio();
+				}
 				resetLibrary();
 				await loadLibraryPage();
 			});
@@ -948,11 +952,19 @@
 				addDetail(grid, "Lyrics source", song.lyrics_source || "Older song; lyrics were not stored.");
 				container.append(grid);
 				addBlock(container, "AI-expanded music prompt", song.prompt || "Not stored");
-				addBlock(container, "Lyrics sent to MiniMax", song.lyrics || "Not stored for this older generation. Earlier radio songs used MiniMax lyrics_optimizer, which can derive lyrics internally from the prompt but does not return them to us.");
+				addBlock(container, "Lyrics", lyricsDetail(song));
 				if (song.generation_input) {
 					addBlock(container, "Exact MiniMax input", JSON.stringify(song.generation_input, null, 2));
 				}
 				if (song.cover_art_prompt) addBlock(container, "Cover prompt", song.cover_art_prompt);
+			}
+
+			function lyricsDetail(song) {
+				if (song.lyrics) return song.lyrics;
+				if (song.lyrics_source === "minimax-lyrics-optimizer") {
+					return "Generated internally by MiniMax lyrics_optimizer from the AI-expanded prompt. MiniMax returns the audio URL, but not the generated lyric text.";
+				}
+				return "Not stored for this older generation.";
 			}
 
 			function addDetail(parent, label, value) {

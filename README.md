@@ -104,10 +104,10 @@ Bindings used (declared in `wrangler.jsonc`):
 
 - Cron runs every 5 minutes and calls `RadioStation.fill(10)` when `RADIO_AUTOFILL=true`.
 - The station DO remembers listener requests and in-flight song IDs, then enqueues one Queue message per needed song.
-- The Queue consumer uses `@cf/meta/llama-3.1-8b-instruct-fast` to expand a listener request into a rich MiniMax prompt and original lyrics, then calls `minimax/music-2.6` with those lyrics instead of relying on opaque MiniMax lyric generation.
+- The Queue consumer uses `@cf/meta/llama-3.1-8b-instruct-fast` to expand a listener request into a rich, non-repeating MiniMax prompt, then calls `minimax/music-2.6` with `lyrics_optimizer=true` so MiniMax handles lyric writing internally.
 - Finished station songs are stored under `radio/audio/` in R2 and metadata under `radio/metadata/`.
 - Generated cover art is stored under `radio/covers/` in R2. Cover generation rotates across supported Workers AI image models and uses visual-only prompts to reduce title/text artifacts.
-- Finished song metadata, including lyrics, prompt plan, model names, creative seeds, and exact generation input, is indexed in D1 tables `songs`, `song_tags`, and `stations`.
+- Finished song metadata, including prompt plan, model names, creative seeds, exact generation input, and lyric source, is indexed in D1 tables `songs`, `song_tags`, and `stations`. MiniMax-generated lyrics are not returned by the model API, so the UI records their source rather than inventing lyrics after the fact.
 - The playlist is stored in the station DO for quick live UI reads; D1 is used for library history, pagination, sorting, and genre/tag filtering.
 
 ## Library queries

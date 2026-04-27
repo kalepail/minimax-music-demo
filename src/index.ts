@@ -57,7 +57,8 @@ import {
 	type StoredAudioRange,
 } from "./lib";
 
-const COVER_PROMPT_PREFIX = "Square visual artwork inspired by an AI radio song.";
+const COVER_PROMPT_PREFIX = "Square pictorial cover art for an AI radio song v3.";
+const RECENT_CONTEXT_LIMIT = 30;
 
 export class MusicJob extends DurableObject<Env> {
 	async start(input: MusicInput, jobId: string): Promise<void> {
@@ -1156,13 +1157,11 @@ async function generateRadioSong(message: RadioGenerateMessage, env: Env): Promi
 			});
 			return fallbackRadioPrompt(message);
 		});
-		const lyrics = plan.lyrics?.trim() || fallbackLyrics(plan, message);
 		const aiInput: Record<string, unknown> = {
 			prompt: plan.prompt,
 			is_instrumental: false,
 			format: message.format,
-			lyrics_optimizer: false,
-			lyrics,
+			lyrics_optimizer: true,
 		};
 		const result = await env.AI.run(
 			RADIO_MUSIC_MODEL,
@@ -1206,8 +1205,7 @@ async function generateRadioSong(message: RadioGenerateMessage, env: Env): Promi
 			prompt: plan.prompt,
 			request_id: message.request_id,
 			request_text: message.request_text,
-			lyrics,
-			lyrics_source: plan.lyrics ? "workers-ai-text-model" : "fallback-template",
+			lyrics_source: "minimax-lyrics-optimizer",
 			music_model: RADIO_MUSIC_MODEL,
 			text_model: RADIO_TEXT_MODEL,
 			creative_seed: message.creative_seed,
@@ -1329,10 +1327,21 @@ async function updateSongCoverArt(db: D1Database, song: RadioSong): Promise<void
 }
 
 function coverArtPrompt(song: RadioSong): string {
-	const tags = song.tags.length > 0 ? song.tags.slice(0, 5).join(", ") : "experimental radio";
+	const tags = visualSafeTags(song.tags).join(", ") || "experimental radio";
 	const genre = song.primary_genre ?? "genre-fluid pop";
 	const mood = song.mood ?? "cinematic";
-	return `${COVER_PROMPT_PREFIX} ${genre}, ${mood}, ${tags}. Use scene, color, lighting, texture, characters, objects, landscape, architecture, pattern, and motion. Visual inspiration: ${song.prompt.slice(0, 300)}. Bold editorial music-art feeling, tactile texture, striking central composition, rich color contrast, layered depth, handmade detail, frame filled edge-to-edge with continuous visual detail.`;
+	const direction = sanitizeCoverFragment(song.creative_axis ?? song.vocal_style ?? "");
+	return `${COVER_PROMPT_PREFIX} ${genre}, ${mood}, ${tags}. ${direction ? `Visual direction: ${direction}.` : ""} Use scene, color, lighting, texture, characters, objects, landscape, architecture, abstract pattern, and motion. Purely pictorial image: blank surfaces, abstract marks only, no readable characters, no signage, no captions, no logos, no numerals, no album-title typography, no watermark, no written language. Bold editorial music-art feeling, tactile texture, striking central composition, rich color contrast, layered depth, handmade detail, frame filled edge-to-edge with continuous visual detail.`;
+}
+
+function visualSafeTags(tags: string[]): string[] {
+	const blocked = /\b(text|typography|letter|word|lyric|caption|sign|signage|logo|label|title|glyph|hieroglyph|alphabet|number|poster|newspaper|book|page|banner|watermark)\b/i;
+	return tags.filter((tag) => !blocked.test(tag)).slice(0, 5);
+}
+
+function sanitizeCoverFragment(value: string): string {
+	const blocked = /\b(text|typography|letter|word|lyric|caption|sign|signage|logo|label|title|glyph|hieroglyph|alphabet|number|poster|newspaper|book|page|banner|watermark)\b/gi;
+	return value.replace(/["'`]/g, "").replace(blocked, "abstract motif").replace(/\s+/g, " ").trim().slice(0, 180);
 }
 
 function coverModelForSong(songId: string): typeof RADIO_COVER_MODELS[number] {
@@ -1406,8 +1415,13 @@ async function createRadioPrompt(
 	env: Env,
 ): Promise<RadioPromptPlan> {
 	const genreLane = message.genre ? `This is for the "${message.genre}" genre radio lane. Keep it recognizably in that lane while still making it surprising.` : "";
-	const recentTitles = await recentSongTitles(env.DB, message.station_id);
+	const recent = await recentSongContext(env.DB, message.station_id);
+	const recentTitles = recent.map((item) => item.title).filter(Boolean);
 	const recentTitleInstruction = recentTitles.length > 0 ? `Recent titles to avoid: ${recentTitles.join(", ")}.` : "";
+	const recentPromptInstruction = recent.length > 0
+		? `Recent prompt shapes to avoid mirroring:\n${recent.slice(0, 10).map((item, index) => `${index + 1}. ${item.prompt.slice(0, 220)}`).join("\n")}`
+		: "";
+	const uniqueness = uniqueSongDirective(message);
 	const seed = message.request_text
 		? `A listener requested: "${message.request_text}". Interpret it creatively without copying copyrighted lyrics or imitating a living artist exactly.`
 		: "No listener request is active. Invent a vivid left-field song concept fit for a strange internet radio station.";
@@ -1420,7 +1434,7 @@ async function createRadioPrompt(
 				{
 					role: "system",
 					content:
-						"You are a music director and lyricist for an always-on AI radio station. Return compact JSON only. Required string fields: title, prompt, lyrics. Optional catalog fields: primary_genre, tags array, mood, energy 1-10, bpm_min, bpm_max, vocal_style. Every song must feel meaningfully different from adjacent generations. The title must be original, specific, and not reused. The prompt must be original, richly musical, and suitable for a text-to-music model. Lyrics must be original singable lines, not a restatement of the title or prompt.",
+						"You are a music director for an always-on AI radio station. Return compact JSON only. Required string fields: title, prompt. Optional catalog fields: primary_genre, tags array, mood, energy 1-10, bpm_min, bpm_max, vocal_style. Every song must feel meaningfully different from adjacent generations. Never mirror a recent prompt's structure, exact instrument list, scene, or title pattern. The prompt must be original, richly musical, and suitable for a text-to-music model with internal lyric generation.",
 				},
 				{
 					role: "user",
@@ -1430,9 +1444,11 @@ Unique creative seed: ${message.creative_seed}
 Mandatory contrast axis: ${message.creative_axis}
 Tempo center: around ${message.creative_bpm} BPM
 Song ID entropy: ${message.song_id}
+Non-repeatable recipe for this exact song: ${uniqueness}
 ${recentTitleInstruction}
+${recentPromptInstruction}
 
-Create one surprising station-ready song concept. Avoid references to specific copyrighted songs or direct artist imitation. Do not use generic titles like Echoflux, Open Frequency, Untitled Signal, or Signal Drift. Keep the prompt under 1200 characters. Write 8-16 lines of original lyrics with verse/chorus shape, separated by \\n, under 1800 characters. Add useful genre/tags/mood metadata for library filtering.`,
+Create one surprising station-ready song concept. The final prompt must include the non-repeatable recipe as concrete musical instructions, not as a token or ID. Avoid references to specific copyrighted songs or direct artist imitation. Do not use generic titles like Echoflux, Open Frequency, Untitled Signal, or Signal Drift. Keep the prompt under 1200 characters. Add useful genre/tags/mood metadata for library filtering.`,
 				},
 			],
 		},
@@ -1450,10 +1466,10 @@ Create one surprising station-ready song concept. Avoid references to specific c
 	if (!text) return fallback;
 	const parsed = parsePromptPlan(text);
 	const title = distinctRadioTitle(parsed.title || fallback.title, recentTitles, message);
+	const prompt = makePromptUnique(parsed.prompt || fallback.prompt, uniqueness, recent.map((item) => item.prompt));
 	return {
 		title,
-		prompt: parsed.prompt || fallback.prompt,
-		lyrics: parsed.lyrics || fallback.lyrics,
+		prompt,
 		primary_genre: parsed.primary_genre || fallback.primary_genre,
 		tags: parsed.tags.length > 0 ? parsed.tags : fallback.tags,
 		mood: parsed.mood || fallback.mood,
@@ -1464,15 +1480,25 @@ Create one surprising station-ready song concept. Avoid references to specific c
 	};
 }
 
-async function recentSongTitles(db: D1Database, stationId: string): Promise<string[]> {
+type RecentSongContext = {
+	title: string;
+	prompt: string;
+	cover_art_prompt?: string;
+};
+
+async function recentSongContext(db: D1Database, stationId: string): Promise<RecentSongContext[]> {
 	const rows = await db.prepare(
-		`SELECT title
+		`SELECT title, prompt, cover_art_prompt
 		 FROM songs
 		 WHERE station_id = ?
 		 ORDER BY completed_at DESC
-		 LIMIT 25`,
-	).bind(stationId).all<{ title: string }>();
-	return (rows.results ?? []).map((row) => row.title).filter(Boolean);
+		 LIMIT ?`,
+	).bind(stationId, RECENT_CONTEXT_LIMIT).all<{ title: string; prompt: string; cover_art_prompt: string | null }>();
+	return (rows.results ?? []).map((row) => ({
+		title: row.title,
+		prompt: row.prompt,
+		cover_art_prompt: row.cover_art_prompt ?? undefined,
+	})).filter((row) => row.title || row.prompt);
 }
 
 function distinctRadioTitle(title: string, recentTitles: string[], message: RadioGenerateMessage): string {
@@ -1485,6 +1511,75 @@ function distinctRadioTitle(title: string, recentTitles: string[], message: Radi
 	const suffix = titleCaseWords(seedWord(message.creative_seed, isRecent ? 1 : 0));
 	const expanded = `${normalized} ${suffix}`;
 	return expanded.slice(0, 120);
+}
+
+function makePromptUnique(prompt: string, uniqueness: string, recentPrompts: string[]): string {
+	const normalized = normalizePromptFingerprint(prompt);
+	const mirrorsRecent = recentPrompts.some((recent) => normalizePromptFingerprint(recent) === normalized);
+	const directive = `Non-repeatable arrangement: ${uniqueness}.`;
+	const base = prompt.includes(uniqueness) ? prompt : `${prompt.trim()} ${directive}`;
+	if (!mirrorsRecent) return base.slice(0, 2000);
+	return `${directive} Avoid the previous arrangement shape entirely. ${base}`.slice(0, 2000);
+}
+
+function normalizePromptFingerprint(value: string): string {
+	return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/).slice(0, 80).join(" ");
+}
+
+function uniqueSongDirective(message: RadioGenerateMessage): string {
+	const seed = `${message.song_id}:${message.creative_seed}:${message.request_text ?? ""}`;
+	const instruments = [
+		"prepared piano pulses",
+		"rubbery fretless bass",
+		"granular vocal chops",
+		"glass marimba ostinato",
+		"detuned brass stabs",
+		"cassette choir pads",
+		"tabla-like electronic drums",
+		"bowed guitar harmonics",
+		"sub-octave handclaps",
+		"modular synth bubbles",
+		"close-mic whispered doubles",
+		"shimmering kalimba loops",
+	];
+	const structures = [
+		"cold open into half-time chorus",
+		"two-bar hook that mutates every refrain",
+		"spoken pre-chorus answered by a sung hook",
+		"instrumental drop before the first verse",
+		"bridge that strips down to one percussion loop",
+		"final chorus with stacked counter-melodies",
+		"intro motif returning backwards in the outro",
+		"call-and-response hook with a rhythmic gap",
+	];
+	const textures = [
+		"rain-slick neon ambience",
+		"sunburned tape saturation",
+		"polished festival width",
+		"dusty basement compression",
+		"icy granular sparkle",
+		"warm valve-radio haze",
+		"dry close-up vocal intimacy",
+		"wide cinematic low-end bloom",
+	];
+	const hooks = [
+		"a rising three-note hook",
+		"a falling chant hook",
+		"a syncopated one-word refrain",
+		"a breathy octave leap",
+		"a clipped percussive chorus phrase",
+		"a long held note over a bass stop",
+		"a whispered pickup into a loud answer",
+		"a hook built from silence and re-entry",
+	];
+	return [
+		pick(instruments, seed, 1),
+		pick(instruments, seed, 2),
+		pick(structures, seed, 3),
+		pick(textures, seed, 4),
+		pick(hooks, seed, 5),
+		`${message.creative_bpm} BPM center`,
+	].join(", ");
 }
 
 function normalizeStoredRadioSong(song: Partial<RadioSong>, message: RadioGenerateMessage): RadioSong {
@@ -1536,7 +1631,6 @@ function fallbackRadioPrompt(message: RadioGenerateMessage): RadioPromptPlan {
 	return {
 		title,
 		prompt: `${seed} ${message.genre ? `Shape it for ${message.genre} radio.` : ""} Creative seed: ${message.creative_seed}. Contrast axis: ${message.creative_axis}. Tempo center: ${message.creative_bpm} BPM. Make a polished, original 2-3 minute song with a strong hook, clear genre fusion, specific instrumentation, vocal direction, production texture, rhythmic motion, and emotional arc. Include an ear-catching intro, a memorable chorus, a dynamic bridge, and a satisfying outro. Avoid direct artist imitation and avoid quoting existing songs.`,
-		lyrics: fallbackLyricsFromText(request ?? message.creative_seed ?? "radio signal", genre),
 		primary_genre: genre,
 		tags: normalizeTags([genre, "ai radio", message.creative_axis, request ?? "original"]),
 		mood: "surprising",
@@ -1545,25 +1639,6 @@ function fallbackRadioPrompt(message: RadioGenerateMessage): RadioPromptPlan {
 		bpm_max: Math.min(240, message.creative_bpm + 8),
 		vocal_style: "expressive lead vocal with memorable hook",
 	};
-}
-
-function fallbackLyrics(plan: RadioPromptPlan, message: RadioGenerateMessage): string {
-	const source = message.request_text?.trim() || plan.title || message.creative_seed || "midnight radio";
-	return fallbackLyricsFromText(source, plan.primary_genre ?? message.genre ?? "radio");
-}
-
-function fallbackLyricsFromText(source: string, genre: string): string {
-	const clean = source.replace(/[^\w\s-]/g, "").split(/\s+/).filter(Boolean).slice(0, 6).join(" ") || "signal in the dark";
-	return [
-		`Verse: I caught ${clean} on a wire in the rain`,
-		`It hummed like ${genre} through the window pane`,
-		"Hands on the rhythm, heart on the line",
-		"Every little echo turning into a sign",
-		`Chorus: We ride the sound until the morning breaks`,
-		"Light in the static, fire in the bass",
-		"Say what you came for, let the night reply",
-		"We become the song as it climbs the sky",
-	].join("\n").slice(0, 1800);
 }
 
 function creativeDirection(songId: string, index: number, genre?: string, request?: string): { axis: string; bpm: number; seed: string } {

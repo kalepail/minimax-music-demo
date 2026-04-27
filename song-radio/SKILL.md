@@ -37,8 +37,8 @@ When asked to keep a station filled:
 3. Enqueue enough messages to reach the target in-flight backlog, usually 10.
 4. Each queue message should:
    - Build a creative song brief from recent listener requests.
-   - Run a text model to turn that brief into a compact, vivid MiniMax prompt plus original lyrics.
-   - Call the music model with explicit lyrics so the UI can later show what was used.
+   - Run a text model to turn that brief into a compact, vivid MiniMax prompt with explicit non-repetition constraints.
+   - Call the music model with `lyrics_optimizer=true` unless a substantially stronger lyric-writing model and QA loop are available.
    - Stream the returned audio URL into R2.
    - Generate square cover art with a Workers AI text-to-image model and store it in R2. Rotate between supported models for variety, and keep the prompt visual-only so model attention stays on scene/color/texture instead of written language.
    - Store a small metadata JSON record in R2.
@@ -54,7 +54,6 @@ For prompt expansion, ask for JSON with:
 {
   "title": "short station-ready title",
   "prompt": "rich original text-to-music prompt",
-  "lyrics": "original singable lyrics with verse/chorus shape",
   "primary_genre": "cosmic disco",
   "tags": ["disco", "modular synth", "euphoric"],
   "mood": "bright",
