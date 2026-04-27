@@ -298,18 +298,23 @@ export class RadioStation extends DurableObject<Env> {
 			const request = requests.length > 0 ? requests[i % requests.length] : undefined;
 			const songId = crypto.randomUUID();
 			const queuedAt = Date.now();
+			const creative = creativeDirection(songId, i, genre, request?.text);
 			const body: RadioGenerateMessage = {
 				song_id: songId,
 				station_id: stationId,
 				format: "mp3",
 				request_text: request?.text,
 				genre,
+				creative_seed: creative.seed,
+				creative_axis: creative.axis,
+				creative_bpm: creative.bpm,
 				queued_at: queuedAt,
 			};
 			messages.push({ body });
 			nextInFlight.push({
 				song_id: songId,
 				queued_at: queuedAt,
+				creative_seed: creative.seed,
 				request_text: request?.text,
 			});
 		}
@@ -403,7 +408,7 @@ export default {
 
 	async queue(batch, env): Promise<void> {
 		for (const message of batch.messages) {
-			const body = message.body as RadioGenerateMessage;
+			const body = normalizeRadioGenerateMessage(message.body as Partial<RadioGenerateMessage>);
 			try {
 				await generateRadioSong(body, env);
 				message.ack();
@@ -420,6 +425,26 @@ export default {
 		}
 	},
 } satisfies ExportedHandler<Env>;
+
+function normalizeRadioGenerateMessage(input: Partial<RadioGenerateMessage>): RadioGenerateMessage {
+	const songId = typeof input.song_id === "string" && input.song_id ? input.song_id : crypto.randomUUID();
+	const stationId = typeof input.station_id === "string" && input.station_id ? input.station_id : RADIO_STATION_ID;
+	const format = input.format === "wav" ? "wav" : "mp3";
+	const genre = normalizeFacet(input.genre);
+	const requestText = typeof input.request_text === "string" && input.request_text.trim() ? input.request_text.trim() : undefined;
+	const creative = creativeDirection(songId, 0, genre, requestText);
+	return {
+		song_id: songId,
+		station_id: stationId,
+		format,
+		request_text: requestText,
+		genre,
+		creative_seed: typeof input.creative_seed === "string" && input.creative_seed ? input.creative_seed : creative.seed,
+		creative_axis: typeof input.creative_axis === "string" && input.creative_axis ? input.creative_axis : creative.axis,
+		creative_bpm: normalizeBoundedInt(input.creative_bpm, 40, 240) ?? creative.bpm,
+		queued_at: typeof input.queued_at === "number" ? input.queued_at : Date.now(),
+	};
+}
 
 async function handleGenerate(request: Request, env: Env): Promise<Response> {
 	let body: unknown;
@@ -943,6 +968,8 @@ async function createRadioPrompt(
 	env: Env,
 ): Promise<RadioPromptPlan> {
 	const genreLane = message.genre ? `This is for the "${message.genre}" genre radio lane. Keep it recognizably in that lane while still making it surprising.` : "";
+	const recentTitles = await recentSongTitles(env.DB, message.station_id);
+	const recentTitleInstruction = recentTitles.length > 0 ? `Recent titles to avoid: ${recentTitles.join(", ")}.` : "";
 	const seed = message.request_text
 		? `A listener requested: "${message.request_text}". Interpret it creatively without copying copyrighted lyrics or imitating a living artist exactly.`
 		: "No listener request is active. Invent a vivid left-field song concept fit for a strange internet radio station.";
@@ -955,11 +982,19 @@ async function createRadioPrompt(
 				{
 					role: "system",
 					content:
-						"You are a music director for an always-on AI radio station. Return compact JSON only. Required string fields: title, prompt. Optional catalog fields: primary_genre, tags array, mood, energy 1-10, bpm_min, bpm_max, vocal_style. The prompt must be original, richly musical, and suitable for a text-to-music model.",
+						"You are a music director for an always-on AI radio station. Return compact JSON only. Required string fields: title, prompt. Optional catalog fields: primary_genre, tags array, mood, energy 1-10, bpm_min, bpm_max, vocal_style. Every song must feel meaningfully different from adjacent generations. The title must be original, specific, and not reused. The prompt must be original, richly musical, and suitable for a text-to-music model.",
 				},
 				{
 					role: "user",
-					content: `${seed}\n${genreLane}\n\nCreate one surprising station-ready song concept. Avoid references to specific copyrighted songs or direct artist imitation. Keep the prompt under 1200 characters. Add useful genre/tags/mood metadata for library filtering.`,
+					content: `${seed}
+${genreLane}
+Unique creative seed: ${message.creative_seed}
+Mandatory contrast axis: ${message.creative_axis}
+Tempo center: around ${message.creative_bpm} BPM
+Song ID entropy: ${message.song_id}
+${recentTitleInstruction}
+
+Create one surprising station-ready song concept. Avoid references to specific copyrighted songs or direct artist imitation. Do not use generic titles like Echoflux, Open Frequency, Untitled Signal, or Signal Drift. Keep the prompt under 1200 characters. Add useful genre/tags/mood metadata for library filtering.`,
 				},
 			],
 		},
@@ -976,8 +1011,9 @@ async function createRadioPrompt(
 	const text = extractTextResponse(response);
 	if (!text) return fallback;
 	const parsed = parsePromptPlan(text);
+	const title = distinctRadioTitle(parsed.title || fallback.title, recentTitles, message);
 	return {
-		title: parsed.title || fallback.title,
+		title,
 		prompt: parsed.prompt || fallback.prompt,
 		primary_genre: parsed.primary_genre || fallback.primary_genre,
 		tags: parsed.tags.length > 0 ? parsed.tags : fallback.tags,
@@ -987,6 +1023,29 @@ async function createRadioPrompt(
 		bpm_max: parsed.bpm_max ?? fallback.bpm_max,
 		vocal_style: parsed.vocal_style || fallback.vocal_style,
 	};
+}
+
+async function recentSongTitles(db: D1Database, stationId: string): Promise<string[]> {
+	const rows = await db.prepare(
+		`SELECT title
+		 FROM songs
+		 WHERE station_id = ?
+		 ORDER BY completed_at DESC
+		 LIMIT 25`,
+	).bind(stationId).all<{ title: string }>();
+	return (rows.results ?? []).map((row) => row.title).filter(Boolean);
+}
+
+function distinctRadioTitle(title: string, recentTitles: string[], message: RadioGenerateMessage): string {
+	const normalized = title.trim().replace(/\s+/g, " ") || fallbackTitle(message);
+	const lower = normalized.toLowerCase();
+	const isRecent = recentTitles.some((recent) => recent.toLowerCase() === lower);
+	const isGeneric = ["echoflux", "open frequency", "untitled signal", "signal drift"].includes(lower);
+	const isOneWord = normalized.split(/\s+/).length < 2;
+	if (!isRecent && !isGeneric && !isOneWord) return normalized.slice(0, 120);
+	const suffix = titleCaseWords(seedWord(message.creative_seed, isRecent ? 1 : 0));
+	const expanded = `${normalized} ${suffix}`;
+	return expanded.slice(0, 120);
 }
 
 function normalizeStoredRadioSong(song: Partial<RadioSong>, message: RadioGenerateMessage): RadioSong {
@@ -1017,21 +1076,58 @@ function normalizeStoredRadioSong(song: Partial<RadioSong>, message: RadioGenera
 function fallbackRadioPrompt(message: RadioGenerateMessage): RadioPromptPlan {
 	const request = message.request_text?.trim();
 	const genre = message.genre ?? normalizeFacet(request) ?? "experimental pop";
-	const title = request ? titleFromRequest(request) : "Open Frequency";
+	const title = request ? `${titleFromRequest(request)} ${seedWord(message.creative_seed, 0)}` : fallbackTitle(message);
 	const seed = request
 		? `A listener requested: "${request}". Interpret it creatively without copying copyrighted lyrics or imitating a living artist exactly.`
 		: "No listener request is active. Invent a vivid left-field song concept fit for a strange internet radio station.";
 	return {
 		title,
-		prompt: `${seed} ${message.genre ? `Shape it for ${message.genre} radio.` : ""} Make a polished, original 2-3 minute song with a strong hook, clear genre fusion, specific instrumentation, vocal direction, production texture, rhythmic motion, and emotional arc. Include an ear-catching intro, a memorable chorus, a dynamic bridge, and a satisfying outro. Avoid direct artist imitation and avoid quoting existing songs.`,
+		prompt: `${seed} ${message.genre ? `Shape it for ${message.genre} radio.` : ""} Creative seed: ${message.creative_seed}. Contrast axis: ${message.creative_axis}. Tempo center: ${message.creative_bpm} BPM. Make a polished, original 2-3 minute song with a strong hook, clear genre fusion, specific instrumentation, vocal direction, production texture, rhythmic motion, and emotional arc. Include an ear-catching intro, a memorable chorus, a dynamic bridge, and a satisfying outro. Avoid direct artist imitation and avoid quoting existing songs.`,
 		primary_genre: genre,
-		tags: normalizeTags([genre, "ai radio", request ?? "original"]),
+		tags: normalizeTags([genre, "ai radio", message.creative_axis, request ?? "original"]),
 		mood: "surprising",
 		energy: 7,
-		bpm_min: 96,
-		bpm_max: 128,
+		bpm_min: Math.max(40, message.creative_bpm - 8),
+		bpm_max: Math.min(240, message.creative_bpm + 8),
 		vocal_style: "expressive lead vocal with memorable hook",
 	};
+}
+
+function creativeDirection(songId: string, index: number, genre?: string, request?: string): { axis: string; bpm: number; seed: string } {
+	const adjectives = ["neon", "velvet", "glass", "feral", "midnight", "solar", "chrome", "honey", "static", "opal", "paper", "thunder"];
+	const places = ["observatory", "subway", "harbor", "greenhouse", "satellite", "market", "arcade", "lighthouse", "desert", "rooftop", "warehouse", "chapel"];
+	const gestures = ["handclap ritual", "broken radio hook", "choir pad swell", "rubber bassline", "stuttering drum fill", "tape-warped bridge", "call-and-response refrain", "wordless falsetto lift"];
+	const palettes = ["warm analog haze", "icy digital shimmer", "dry close-mic intimacy", "wide festival gloss", "dusty cassette grit", "hyperclean club pressure"];
+	const axis = `${pick(adjectives, songId, index)} ${pick(places, songId, index + 3)} with ${pick(gestures, songId, index + 7)} and ${pick(palettes, songId, index + 11)}`;
+	const bpm = 72 + (hashString(`${songId}:${index}:${genre ?? ""}:${request ?? ""}`) % 84);
+	const seed = `${pick(adjectives, songId, index + 13)}-${pick(places, songId, index + 17)}-${songId.slice(0, 8)}`;
+	return { axis, bpm, seed };
+}
+
+function fallbackTitle(message: RadioGenerateMessage): string {
+	return `${titleCaseWords(seedWord(message.creative_seed, 0))} ${titleCaseWords(seedWord(message.creative_seed, 1))}`;
+}
+
+function seedWord(seed: string | undefined, index: number): string {
+	const words = (seed || "signal drift").split(/[-\s]+/).filter(Boolean);
+	return words[index % Math.max(1, words.length)] ?? "signal";
+}
+
+function pick(values: string[], seed: string, salt: number): string {
+	return values[(hashString(`${seed}:${salt}`) % values.length + values.length) % values.length];
+}
+
+function hashString(value: string): number {
+	let hash = 2166136261;
+	for (let i = 0; i < value.length; i++) {
+		hash ^= value.charCodeAt(i);
+		hash = Math.imul(hash, 16777619);
+	}
+	return hash >>> 0;
+}
+
+function titleCaseWords(value: string): string {
+	return value.replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 function titleFromRequest(request: string): string {

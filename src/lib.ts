@@ -14,6 +14,7 @@ export type RadioRequest = {
 export type RadioInFlight = {
 	song_id: string;
 	queued_at: number;
+	creative_seed?: string;
 	request_text?: string;
 };
 
@@ -73,6 +74,9 @@ export type RadioGenerateMessage = {
 	format: MusicInput["format"];
 	request_text?: string;
 	genre?: string;
+	creative_seed: string;
+	creative_axis: string;
+	creative_bpm: number;
 	queued_at: number;
 };
 
