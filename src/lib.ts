@@ -15,7 +15,15 @@ export type RadioInFlight = {
 	song_id: string;
 	queued_at: number;
 	creative_seed?: string;
+	request_id?: string;
+	request_created_at?: number;
 	request_text?: string;
+};
+
+export type FulfilledRadioRequest = RadioRequest & {
+	fulfilled_at: number;
+	song_id: string;
+	song_title: string;
 };
 
 export type RadioSong = {
@@ -23,6 +31,7 @@ export type RadioSong = {
 	station_id: string;
 	title: string;
 	prompt: string;
+	request_id?: string;
 	request_text?: string;
 	format: MusicInput["format"];
 	audio_object_key: string;
@@ -64,6 +73,7 @@ export type RadioStationRecord = {
 export type RadioStatus = {
 	in_flight: RadioInFlight[];
 	playlist: RadioSong[];
+	fulfilled_requests: FulfilledRadioRequest[];
 	requests: RadioRequest[];
 	target_backlog: number;
 };
@@ -72,6 +82,8 @@ export type RadioGenerateMessage = {
 	song_id: string;
 	station_id: string;
 	format: MusicInput["format"];
+	request_id?: string;
+	request_created_at?: number;
 	request_text?: string;
 	genre?: string;
 	creative_seed: string;
@@ -157,6 +169,7 @@ export const RADIO_STATION_ID = "main";
 export const RADIO_TARGET_BACKLOG = 10;
 export const RADIO_MAX_PLAYLIST = 250;
 export const RADIO_MAX_REQUESTS = 50;
+export const RADIO_MAX_FULFILLED_REQUESTS = 100;
 export const RADIO_REQUEST_MAX_CHARS = 500;
 export const RADIO_IN_FLIGHT_STALE_MS = 45 * 60 * 1000;
 export const RADIO_MAX_QUEUE_ATTEMPTS = 3;

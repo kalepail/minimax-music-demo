@@ -5,6 +5,7 @@ import {
 	RATE_LIMIT_WINDOW_MS,
 	RADIO_IN_FLIGHT_STALE_MS,
 	RADIO_MAX_QUEUE_ATTEMPTS,
+	RADIO_MAX_FULFILLED_REQUESTS,
 	RADIO_MAX_PLAYLIST,
 	RADIO_MAX_REQUESTS,
 	RADIO_STATION_ID,
@@ -43,6 +44,7 @@ import {
 	type MusicInput,
 	type RateLimitRecord,
 	type RadioGenerateMessage,
+	type FulfilledRadioRequest,
 	type RadioInFlight,
 	type RadioPromptPlan,
 	type RadioRequest,
@@ -255,13 +257,11 @@ export class MusicJob extends DurableObject<Env> {
 
 export class RadioStation extends DurableObject<Env> {
 	async status(): Promise<RadioStatus> {
-		const [playlist, requests, inFlight] = await Promise.all([
-			this.playlist(),
-			this.requests(),
-			this.inFlight(),
-		]);
+		const { playlist, requests, fulfilled } = await this.reconcileRequests();
+		const inFlight = await this.inFlight();
 		return {
 			playlist,
+			fulfilled_requests: fulfilled,
 			requests,
 			in_flight: inFlight,
 			target_backlog: RADIO_TARGET_BACKLOG,
@@ -282,7 +282,7 @@ export class RadioStation extends DurableObject<Env> {
 
 	async fill(target = RADIO_TARGET_BACKLOG, stationId = RADIO_STATION_ID, genre?: string): Promise<number> {
 		const now = Date.now();
-		const requests = await this.requests();
+		const requests = [...(await this.requests())];
 		const freshInFlight = (await this.inFlight()).filter((item) => now - item.queued_at < RADIO_IN_FLIGHT_STALE_MS);
 		const needed = Math.max(0, target - freshInFlight.length);
 		if (needed === 0) {
@@ -295,7 +295,7 @@ export class RadioStation extends DurableObject<Env> {
 		const nextInFlight = [...freshInFlight];
 		const messages: MessageSendRequest<RadioGenerateMessage>[] = [];
 		for (let i = 0; i < needed; i++) {
-			const request = requests.length > 0 ? requests[i % requests.length] : undefined;
+			const request = requests.shift();
 			const songId = crypto.randomUUID();
 			const queuedAt = Date.now();
 			const creative = creativeDirection(songId, i, genre, request?.text);
@@ -303,6 +303,8 @@ export class RadioStation extends DurableObject<Env> {
 				song_id: songId,
 				station_id: stationId,
 				format: "mp3",
+				request_id: request?.id,
+				request_created_at: request?.created_at,
 				request_text: request?.text,
 				genre,
 				creative_seed: creative.seed,
@@ -315,21 +317,34 @@ export class RadioStation extends DurableObject<Env> {
 				song_id: songId,
 				queued_at: queuedAt,
 				creative_seed: creative.seed,
+				request_id: request?.id,
+				request_created_at: request?.created_at,
 				request_text: request?.text,
 			});
 		}
 
 		await this.env.RADIO_QUEUE.sendBatch(messages);
-		await this.ctx.storage.put("in_flight", nextInFlight);
+		await Promise.all([
+			this.ctx.storage.put("in_flight", nextInFlight),
+			this.ctx.storage.put("requests", requests),
+		]);
 		return messages.length;
 	}
 
 	async complete(song: RadioSong): Promise<void> {
 		const playlist = [song, ...(await this.playlist()).filter((item) => item.id !== song.id)].slice(0, RADIO_MAX_PLAYLIST);
-		const inFlight = (await this.inFlight()).filter((item) => item.song_id !== song.id);
+		const existingInFlight = await this.inFlight();
+		const completedInFlight = existingInFlight.find((item) => item.song_id === song.id);
+		const inFlight = existingInFlight.filter((item) => item.song_id !== song.id);
+		const fulfilled = await this.fulfilledRequests();
+		const fulfilledRequest = requestFulfillment(song, completedInFlight);
+		const nextFulfilled = fulfilledRequest
+			? [fulfilledRequest, ...fulfilled.filter((item) => item.id !== fulfilledRequest.id)].slice(0, RADIO_MAX_FULFILLED_REQUESTS)
+			: fulfilled;
 		await Promise.all([
 			this.ctx.storage.put("playlist", playlist),
 			this.ctx.storage.put("in_flight", inFlight),
+			this.ctx.storage.put("fulfilled_requests", nextFulfilled),
 		]);
 	}
 
@@ -339,11 +354,51 @@ export class RadioStation extends DurableObject<Env> {
 	}
 
 	async fail(songId: string, error: string): Promise<void> {
-		const inFlight = (await this.inFlight()).filter((item) => item.song_id !== songId);
+		const existingInFlight = await this.inFlight();
+		const failed = existingInFlight.find((item) => item.song_id === songId);
+		const inFlight = existingInFlight.filter((item) => item.song_id !== songId);
+		const requests = failed?.request_id && failed.request_text
+			? requeueRequest(await this.requests(), failed)
+			: await this.requests();
 		await Promise.all([
 			this.ctx.storage.put("in_flight", inFlight),
+			this.ctx.storage.put("requests", requests),
 			this.noteFailure(songId, error),
 		]);
+	}
+
+	private async reconcileRequests(): Promise<{ playlist: RadioSong[]; requests: RadioRequest[]; fulfilled: FulfilledRadioRequest[] }> {
+		const [playlist, requests, fulfilled] = await Promise.all([
+			this.playlist(),
+			this.requests(),
+			this.fulfilledRequests(),
+		]);
+		if (requests.length === 0) return { playlist, requests, fulfilled };
+
+		const nextRequests = [...requests];
+		const nextFulfilled = [...fulfilled];
+		for (const request of requests) {
+			const song = playlist.find((item) => item.request_id === request.id || item.request_text === request.text);
+			if (!song) continue;
+			const index = nextRequests.findIndex((item) => item.id === request.id);
+			if (index >= 0) nextRequests.splice(index, 1);
+			if (!nextFulfilled.some((item) => item.id === request.id)) {
+				nextFulfilled.unshift({
+					...request,
+					fulfilled_at: song.completed_at,
+					song_id: song.id,
+					song_title: song.title,
+				});
+			}
+		}
+
+		if (nextRequests.length !== requests.length || nextFulfilled.length !== fulfilled.length) {
+			await Promise.all([
+				this.ctx.storage.put("requests", nextRequests),
+				this.ctx.storage.put("fulfilled_requests", nextFulfilled.slice(0, RADIO_MAX_FULFILLED_REQUESTS)),
+			]);
+		}
+		return { playlist, requests: nextRequests, fulfilled: nextFulfilled.slice(0, RADIO_MAX_FULFILLED_REQUESTS) };
 	}
 
 	private async playlist(): Promise<RadioSong[]> {
@@ -354,9 +409,40 @@ export class RadioStation extends DurableObject<Env> {
 		return (await this.ctx.storage.get<RadioRequest[]>("requests")) ?? [];
 	}
 
+	private async fulfilledRequests(): Promise<FulfilledRadioRequest[]> {
+		return (await this.ctx.storage.get<FulfilledRadioRequest[]>("fulfilled_requests")) ?? [];
+	}
+
 	private async inFlight(): Promise<RadioInFlight[]> {
 		return (await this.ctx.storage.get<RadioInFlight[]>("in_flight")) ?? [];
 	}
+}
+
+function requestFulfillment(song: RadioSong, inFlight?: RadioInFlight): FulfilledRadioRequest | undefined {
+	const requestId = song.request_id ?? inFlight?.request_id;
+	const requestText = song.request_text ?? inFlight?.request_text;
+	if (!requestId || !requestText) return undefined;
+	return {
+		id: requestId,
+		text: requestText,
+		created_at: inFlight?.request_created_at ?? song.created_at,
+		fulfilled_at: song.completed_at,
+		song_id: song.id,
+		song_title: song.title,
+	};
+}
+
+function requeueRequest(requests: RadioRequest[], inFlight: RadioInFlight): RadioRequest[] {
+	if (!inFlight.request_id || !inFlight.request_text) return requests;
+	if (requests.some((request) => request.id === inFlight.request_id)) return requests;
+	return [
+		{
+			id: inFlight.request_id,
+			text: inFlight.request_text,
+			created_at: inFlight.request_created_at ?? inFlight.queued_at,
+		},
+		...requests,
+	].slice(0, RADIO_MAX_REQUESTS);
 }
 
 export default {
@@ -438,6 +524,8 @@ function normalizeRadioGenerateMessage(input: Partial<RadioGenerateMessage>): Ra
 		station_id: stationId,
 		format,
 		request_text: requestText,
+		request_id: typeof input.request_id === "string" && input.request_id ? input.request_id : undefined,
+		request_created_at: typeof input.request_created_at === "number" ? input.request_created_at : undefined,
 		genre,
 		creative_seed: typeof input.creative_seed === "string" && input.creative_seed ? input.creative_seed : creative.seed,
 		creative_axis: typeof input.creative_axis === "string" && input.creative_axis ? input.creative_axis : creative.axis,
@@ -622,7 +710,7 @@ async function handleLibrary(url: URL, env: Env): Promise<Response> {
 
 async function handleLibrarySong(songId: string, env: Env): Promise<Response> {
 	const row = await env.DB.prepare(
-		`SELECT id, station_id, title, prompt, request_text, format, audio_object_key, metadata_object_key,
+		`SELECT id, station_id, title, prompt, request_id, request_text, format, audio_object_key, metadata_object_key,
 			audio_content_type, primary_genre, mood, energy, bpm_min, bpm_max, vocal_style,
 			created_at, completed_at, duration_ms
 		 FROM songs
@@ -673,6 +761,7 @@ type SongRow = {
 	station_id: string;
 	title: string;
 	prompt: string;
+	request_id: string | null;
 	request_text: string | null;
 	format: MusicInput["format"];
 	audio_object_key: string;
@@ -713,7 +802,7 @@ async function listSongs(db: D1Database, query: LibraryQuery): Promise<{ songs: 
 	const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
 	const rows = await db.prepare(
 		`SELECT s.id, s.station_id, s.title, s.prompt, s.request_text, s.format, s.audio_object_key,
-			s.metadata_object_key, s.audio_content_type, s.primary_genre, s.mood, s.energy, s.bpm_min,
+			s.request_id, s.metadata_object_key, s.audio_content_type, s.primary_genre, s.mood, s.energy, s.bpm_min,
 			s.bpm_max, s.vocal_style, s.created_at, s.completed_at, s.duration_ms
 		 FROM songs s
 		 ${whereSql}
@@ -768,6 +857,7 @@ function songFromRow(row: SongRow, tags: string[]): RadioSong {
 		station_id: row.station_id,
 		title: row.title,
 		prompt: row.prompt,
+		request_id: row.request_id ?? undefined,
 		request_text: row.request_text ?? undefined,
 		format: row.format,
 		audio_object_key: row.audio_object_key,
@@ -800,15 +890,16 @@ async function persistSongCatalog(db: D1Database, song: RadioSong): Promise<void
 	const statements = [
 		db.prepare(
 			`INSERT INTO songs (
-				id, station_id, title, prompt, request_text, format, audio_object_key, metadata_object_key,
+				id, station_id, title, prompt, request_id, request_text, format, audio_object_key, metadata_object_key,
 				audio_content_type, primary_genre, mood, energy, bpm_min, bpm_max, vocal_style,
 				created_at, completed_at, duration_ms
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(id) DO UPDATE SET
 				station_id = excluded.station_id,
 				title = excluded.title,
 				prompt = excluded.prompt,
+				request_id = excluded.request_id,
 				request_text = excluded.request_text,
 				format = excluded.format,
 				audio_object_key = excluded.audio_object_key,
@@ -828,6 +919,7 @@ async function persistSongCatalog(db: D1Database, song: RadioSong): Promise<void
 			song.station_id,
 			song.title,
 			song.prompt,
+			song.request_id ?? null,
 			song.request_text ?? null,
 			song.format,
 			song.audio_object_key,
@@ -934,6 +1026,7 @@ async function generateRadioSong(message: RadioGenerateMessage, env: Env): Promi
 			station_id: message.station_id,
 			title: plan.title,
 			prompt: plan.prompt,
+			request_id: message.request_id,
 			request_text: message.request_text,
 			format: message.format,
 			audio_object_key: audioObjectKey,
@@ -1055,6 +1148,7 @@ function normalizeStoredRadioSong(song: Partial<RadioSong>, message: RadioGenera
 		station_id: typeof song.station_id === "string" && song.station_id ? song.station_id : message.station_id,
 		title: typeof song.title === "string" && song.title ? song.title : "Untitled Signal",
 		prompt: typeof song.prompt === "string" && song.prompt ? song.prompt : fallbackRadioPrompt(message).prompt,
+		request_id: typeof song.request_id === "string" && song.request_id ? song.request_id : message.request_id,
 		request_text: typeof song.request_text === "string" ? song.request_text : message.request_text,
 		format: song.format === "wav" ? "wav" : "mp3",
 		audio_object_key: typeof song.audio_object_key === "string" && song.audio_object_key ? song.audio_object_key : radioAudioObjectKey(message.song_id, message.format),

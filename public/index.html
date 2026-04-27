@@ -327,7 +327,10 @@
 					></textarea>
 					<button type="button" id="sendRadioRequest">Send request</button>
 					<div id="radioStatus" class="status"></div>
+					<label style="margin-top: 12px">Queued</label>
 					<div id="requests" class="request-list"></div>
+					<label style="margin-top: 12px">Fulfilled</label>
+					<div id="fulfilledRequests" class="request-list"></div>
 				</section>
 			</div>
 
@@ -383,6 +386,7 @@
 			const sendRadioRequestButton = document.getElementById("sendRadioRequest");
 			const radioStatusEl = document.getElementById("radioStatus");
 			const requestsEl = document.getElementById("requests");
+			const fulfilledRequestsEl = document.getElementById("fulfilledRequests");
 			const libraryGenreEl = document.getElementById("libraryGenre");
 			const libraryTagEl = document.getElementById("libraryTag");
 			const applyLibraryButton = document.getElementById("applyLibrary");
@@ -622,6 +626,7 @@
 			function renderRadio(data) {
 				const playlist = Array.isArray(data.playlist) ? data.playlist : [];
 				const requests = Array.isArray(data.requests) ? data.requests : [];
+				const fulfilledRequests = Array.isArray(data.fulfilled_requests) ? data.fulfilled_requests : [];
 				const inFlight = Array.isArray(data.in_flight) ? data.in_flight : [];
 				radioCountEl.textContent = `songs=${playlist.length}`;
 				radioInflightEl.textContent = `in_flight=${inFlight.length}`;
@@ -648,6 +653,30 @@
 					item.className = "request-item";
 					item.textContent = request.text;
 					requestsEl.append(item);
+				}
+				if (requests.length === 0) {
+					const item = document.createElement("div");
+					item.className = "request-item";
+					item.textContent = "No queued requests";
+					requestsEl.append(item);
+				}
+
+				fulfilledRequestsEl.innerHTML = "";
+				for (const request of fulfilledRequests.slice(0, 10)) {
+					const item = document.createElement("div");
+					item.className = "request-item";
+					item.textContent = `${request.text} -> ${request.song_title}`;
+					item.addEventListener("click", () => {
+						const song = playlist.find((entry) => entry.id === request.song_id);
+						if (song) playRadioSong(song);
+					});
+					fulfilledRequestsEl.append(item);
+				}
+				if (fulfilledRequests.length === 0) {
+					const item = document.createElement("div");
+					item.className = "request-item";
+					item.textContent = "No fulfilled requests yet";
+					fulfilledRequestsEl.append(item);
 				}
 			}
 
