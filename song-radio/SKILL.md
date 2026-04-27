@@ -89,7 +89,7 @@ Prefer these route shapes when building a web UI:
 - `GET /api/radio/stations` returns D1-backed stations and genre counts.
 - `GET /api/radio/audio/:songId` streams a stored R2 object with byte-range support.
 - `GET /api/radio/cover/:songId` serves generated cover art from R2.
-- `POST /api/radio/backfill-covers` generates missing covers. Protect it with a Worker secret.
+- `POST /api/radio/backfill-covers` generates missing covers. Protect it with a Worker secret. Accept `{ "regenerate": true }` when existing covers should be replaced after model or prompt changes.
 - `GET /api/library` returns D1-backed song pages with `limit`, `cursor`, `sort`, `genre`, `tag`, `mood`, and `station_id` filters.
 - `GET /api/library/:songId` returns one song record with tags.
 

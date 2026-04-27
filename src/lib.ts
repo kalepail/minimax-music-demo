@@ -180,7 +180,7 @@ export const RADIO_REQUEST_MAX_CHARS = 500;
 export const RADIO_IN_FLIGHT_STALE_MS = 45 * 60 * 1000;
 export const RADIO_MAX_QUEUE_ATTEMPTS = 3;
 export const RADIO_TEXT_MODEL = "@cf/meta/llama-3.1-8b-instruct-fast";
-export const RADIO_COVER_MODEL = "@cf/black-forest-labs/flux-1-schnell";
+export const RADIO_COVER_MODEL = "@cf/bytedance/stable-diffusion-xl-lightning";
 export const LIBRARY_MAX_LIMIT = 100;
 export const LIBRARY_DEFAULT_LIMIT = 25;
 

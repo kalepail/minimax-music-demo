@@ -453,6 +453,7 @@
 			const POLL_TIMEOUT_MS = 15 * 60 * 1000;
 			const JOB_STORAGE_KEY = "minimax-music-demo:last-job";
 			const RADIO_REFRESH_MS = 5000;
+			const COVER_CACHE_VERSION = "sdxl-textfree-v1";
 			let radioStatus = null;
 			let libraryCursor = "0";
 			let loadedLibrarySongs = [];
@@ -812,7 +813,7 @@
 				fallback.className = "cover-fallback";
 				if (song.id) {
 					const img = document.createElement("img");
-					img.src = `/api/radio/cover/${song.id}?v=${song.cover_art_created_at || song.completed_at || Date.now()}`;
+					img.src = `/api/radio/cover/${song.id}?v=${COVER_CACHE_VERSION}-${song.cover_art_created_at || song.completed_at || Date.now()}`;
 					img.alt = "";
 					img.loading = "lazy";
 					img.addEventListener("error", () => {

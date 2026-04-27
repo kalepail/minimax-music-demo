@@ -56,6 +56,26 @@ import {
 	type StoredAudioRange,
 } from "./lib";
 
+const COVER_NEGATIVE_PROMPT = [
+	"text",
+	"letters",
+	"words",
+	"numbers",
+	"typography",
+	"font",
+	"title",
+	"caption",
+	"label",
+	"logo",
+	"watermark",
+	"signature",
+	"poster text",
+	"album title",
+	"artist name",
+	"readable symbols",
+	"hieroglyphic writing",
+].join(", ");
+
 export class MusicJob extends DurableObject<Env> {
 	async start(input: MusicInput, jobId: string): Promise<void> {
 		const existing = await this.ctx.storage.get<JobRecord>("job");
@@ -786,13 +806,17 @@ async function handleCoverBackfill(request: Request, env: Env): Promise<Response
 	}
 
 	let limit = 5;
+	let regenerate = false;
 	if (request.headers.get("Content-Type")?.includes("application/json")) {
 		const body = await request.json().catch(() => undefined);
 		if (body && typeof body === "object" && typeof (body as { limit?: unknown }).limit === "number") {
 			limit = Math.max(1, Math.min(10, Math.floor((body as { limit: number }).limit)));
 		}
+		if (body && typeof body === "object" && typeof (body as { regenerate?: unknown }).regenerate === "boolean") {
+			regenerate = (body as { regenerate: boolean }).regenerate;
+		}
 	}
-	const result = await backfillCoverArt(env, limit);
+	const result = await backfillCoverArt(env, limit, regenerate);
 	return json(result, result.generated > 0 ? 202 : 200);
 }
 
@@ -1168,23 +1192,23 @@ async function generateRadioSong(message: RadioGenerateMessage, env: Env): Promi
 	}
 }
 
-async function backfillCoverArt(env: Env, limit: number): Promise<{ checked: number; generated: number; songs: Array<{ id: string; title: string; cover_art_object_key?: string }> }> {
+async function backfillCoverArt(env: Env, limit: number, regenerate = false): Promise<{ checked: number; generated: number; songs: Array<{ id: string; title: string; cover_art_object_key?: string }> }> {
 	const rows = await env.DB.prepare(
 		`SELECT id, station_id, title, prompt, cover_art_object_key, cover_art_prompt, cover_art_model,
 			cover_art_created_at, request_id, request_text, format, audio_object_key, metadata_object_key,
 			audio_content_type, primary_genre, mood, energy, bpm_min, bpm_max, vocal_style,
 			created_at, completed_at, duration_ms
 		 FROM songs
-		 WHERE cover_art_object_key IS NULL OR cover_art_object_key = ''
+		 WHERE cover_art_object_key IS NULL OR cover_art_object_key = '' OR cover_art_model IS NULL OR cover_art_model != ? OR ? = 1
 		 ORDER BY completed_at DESC
 		 LIMIT ?`,
-	).bind(limit).all<SongRow>();
+	).bind(RADIO_COVER_MODEL, regenerate ? 1 : 0, limit).all<SongRow>();
 
 	const songs = (rows.results ?? []).map((row) => songFromRow(row, []));
 	let generated = 0;
 	const updated: Array<{ id: string; title: string; cover_art_object_key?: string }> = [];
 	for (const song of songs) {
-		await generateAndAttachCoverArt(env, song);
+		await generateAndAttachCoverArt(env, song, regenerate);
 		await updateSongCoverArt(env.DB, song);
 		const metadata = await env.AUDIO_BUCKET.get(song.metadata_object_key);
 		if (metadata) {
@@ -1202,14 +1226,18 @@ async function backfillCoverArt(env: Env, limit: number): Promise<{ checked: num
 	return { checked: songs.length, generated, songs: updated };
 }
 
-async function generateAndAttachCoverArt(env: Env, song: RadioSong): Promise<void> {
-	if (song.cover_art_object_key) return;
+async function generateAndAttachCoverArt(env: Env, song: RadioSong, regenerate = false): Promise<void> {
+	if (song.cover_art_object_key && song.cover_art_model === RADIO_COVER_MODEL && !regenerate) return;
 	const prompt = coverArtPrompt(song);
 	const response = await env.AI.run(
 		RADIO_COVER_MODEL,
 		{
 			prompt,
-			steps: 4,
+			negative_prompt: COVER_NEGATIVE_PROMPT,
+			num_steps: 8,
+			guidance: 8.5,
+			width: 1024,
+			height: 1024,
 			seed: hashString(song.id),
 		},
 		{
@@ -1221,10 +1249,10 @@ async function generateAndAttachCoverArt(env: Env, song: RadioSong): Promise<voi
 			signal: AbortSignal.timeout(60_000),
 		},
 	);
-	const image = extractBase64Image(response);
+	const image = await extractImageBytes(response);
 	if (!image) throw new Error(`Cover art model returned no image: ${snippet(response) ?? "empty response"}`);
 	const key = radioCoverObjectKey(song.id);
-	await env.AUDIO_BUCKET.put(key, base64ToBytes(image), {
+	await env.AUDIO_BUCKET.put(key, image, {
 		httpMetadata: {
 			cacheControl: "public, max-age=86400",
 			contentType: "image/jpeg",
@@ -1258,7 +1286,36 @@ function coverArtPrompt(song: RadioSong): string {
 	const tags = song.tags.length > 0 ? song.tags.slice(0, 5).join(", ") : "experimental radio";
 	const genre = song.primary_genre ?? "genre-fluid pop";
 	const mood = song.mood ?? "cinematic";
-	return `Square album cover artwork for an AI radio song titled "${song.title}". ${genre}, ${mood}, ${tags}. Visualize the sound world: ${song.prompt.slice(0, 420)}. Bold editorial music artwork, tactile texture, striking central composition, rich color contrast. Absolutely no text of any kind in the image: no words, no letters, no numbers, no readable symbols, no typography, no captions, no labels, no logos, no artist names, no UI, no watermark, no signature.`;
+	return `Square text-free visual artwork for an AI radio song. Do not include or imply any written title. ${genre}, ${mood}, ${tags}. Visualize the sound world as pure imagery: ${song.prompt.slice(0, 360)}. Bold editorial music artwork, tactile texture, striking central composition, rich color contrast, no poster layout, no packaging mockup, no blank label area. Absolutely no text of any kind in the image: no words, no letters, no numbers, no readable symbols, no typography, no captions, no labels, no logos, no artist names, no UI, no watermark, no signature.`;
+}
+
+async function extractImageBytes(value: unknown): Promise<Uint8Array | undefined> {
+	if (!value) return undefined;
+	if (value instanceof Uint8Array) return value;
+	if (value instanceof ArrayBuffer) return new Uint8Array(value);
+	if (value instanceof ReadableStream) return streamToBytes(value);
+	if (value instanceof Response) return new Uint8Array(await value.arrayBuffer());
+	const image = extractBase64Image(value);
+	return image ? base64ToBytes(image) : undefined;
+}
+
+async function streamToBytes(stream: ReadableStream): Promise<Uint8Array> {
+	const reader = stream.getReader();
+	const chunks: Uint8Array[] = [];
+	let size = 0;
+	while (true) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		chunks.push(value);
+		size += value.byteLength;
+	}
+	const bytes = new Uint8Array(size);
+	let offset = 0;
+	for (const chunk of chunks) {
+		bytes.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return bytes;
 }
 
 function extractBase64Image(value: unknown): string | undefined {

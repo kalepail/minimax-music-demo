@@ -128,7 +128,7 @@ curl -X POST "http://localhost:8787/api/radio/fill" \
   -d '{"genre":"ambient drone","target":10}'
 ```
 
-Cover backfill requires the `COVER_BACKFILL_TOKEN` Worker secret and an `Authorization: Bearer ...` header because it can spend Workers AI image-generation quota.
+Cover backfill requires the `COVER_BACKFILL_TOKEN` Worker secret and an `Authorization: Bearer ...` header because it can spend Workers AI image-generation quota. Pass `{ "regenerate": true }` to replace existing covers, for example after changing the cover model or prompt.
 
 ## License
 
