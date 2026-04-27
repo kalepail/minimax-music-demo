@@ -19,6 +19,8 @@ export type JobRecord = {
 	state: JobState;
 	input: MusicInput;
 	audio_url?: string;
+	audio_object_key?: string;
+	audio_content_type?: string;
 	error?: string;
 	attempts: number;
 	attempt_log: AttemptLog[];
@@ -28,9 +30,14 @@ export type JobRecord = {
 	expires_at?: number;
 };
 
-export type PublicJobRecord = Omit<JobRecord, "audio_url" | "input"> & {
+export type PublicJobRecord = Omit<JobRecord, "audio_content_type" | "audio_object_key" | "audio_url" | "input"> & {
 	ready: boolean;
 };
+
+export type StoredAudioObject = Pick<
+	R2ObjectBody,
+	"body" | "httpEtag" | "httpMetadata" | "range" | "size" | "writeHttpMetadata"
+>;
 
 export type RateLimitRecord = {
 	window_start: number;
@@ -47,7 +54,7 @@ export type RateLimitResult = {
 export const PROMPT_MAX_CHARS = 2000;
 export const LYRICS_MAX_CHARS = 3500;
 export const FORMATS = new Set(["mp3", "wav"]);
-export const ATTEMPT_TIMEOUT_MS = 14 * 60 * 1000;
+export const ATTEMPT_TIMEOUT_MS = 13 * 60 * 1000;
 export const STALE_JOB_MS = ATTEMPT_TIMEOUT_MS + 30 * 1000;
 export const JOB_TTL_MS = 60 * 60 * 1000;
 export const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
@@ -82,7 +89,13 @@ export function parseInput(body: unknown): MusicInput | { error: string } {
 }
 
 export function publicStatus(record: JobRecord): PublicJobRecord {
-	const { audio_url: _audioUrl, input: _input, ...publicRecord } = record;
+	const {
+		audio_content_type: _audioContentType,
+		audio_object_key: _audioObjectKey,
+		audio_url: _audioUrl,
+		input: _input,
+		...publicRecord
+	} = record;
 	return { ...publicRecord, ready: record.state === "complete" };
 }
 
@@ -158,6 +171,10 @@ export function extractAudioUrl(value: unknown): string | undefined {
 	return undefined;
 }
 
+export function audioObjectKey(jobId: string, format: MusicInput["format"]): string {
+	return `music/${jobId}.${format}`;
+}
+
 export function snippet(value: unknown): string | undefined {
 	if (value === undefined || value === null) return undefined;
 	try {
@@ -172,7 +189,7 @@ export function audioResponseHeaders(record: JobRecord, upstream: Response): Hea
 	const headers = new Headers();
 	headers.set(
 		"Content-Type",
-		upstream.headers.get("content-type") ?? (record.input.format === "wav" ? "audio/wav" : "audio/mpeg"),
+		upstream.headers.get("content-type") ?? audioContentType(record),
 	);
 	headers.set("Cache-Control", "no-store");
 
@@ -182,4 +199,57 @@ export function audioResponseHeaders(record: JobRecord, upstream: Response): Hea
 	}
 	if (!headers.has("Accept-Ranges")) headers.set("Accept-Ranges", "none");
 	return headers;
+}
+
+export function storedAudioResponseHeaders(record: JobRecord, object: StoredAudioObject): Headers {
+	const headers = new Headers();
+	object.writeHttpMetadata(headers);
+	headers.set("Content-Type", object.httpMetadata?.contentType ?? audioContentType(record));
+	headers.set("Cache-Control", "no-store");
+	headers.set("ETag", object.httpEtag);
+	headers.set("Accept-Ranges", "bytes");
+	headers.set("Content-Length", String(storedAudioBodySize(object)));
+
+	const contentRange = storedAudioContentRange(object);
+	if (contentRange) headers.set("Content-Range", contentRange);
+	return headers;
+}
+
+export function storedAudioStatus(object: StoredAudioObject): 200 | 206 {
+	return object.range ? 206 : 200;
+}
+
+function audioContentType(record: JobRecord): string {
+	return record.audio_content_type ?? (record.input.format === "wav" ? "audio/wav" : "audio/mpeg");
+}
+
+function storedAudioBodySize(object: StoredAudioObject): number {
+	if (!object.range) return object.size;
+	const range = normalizeStoredAudioRange(object);
+	return Math.max(0, range.end - range.start + 1);
+}
+
+function storedAudioContentRange(object: StoredAudioObject): string | undefined {
+	if (!object.range || object.size === 0) return undefined;
+	const range = normalizeStoredAudioRange(object);
+	return `bytes ${range.start}-${range.end}/${object.size}`;
+}
+
+function normalizeStoredAudioRange(object: StoredAudioObject): { start: number; end: number } {
+	const size = object.size;
+	const range = object.range;
+	if (!range) return { start: 0, end: Math.max(0, size - 1) };
+
+	if ("suffix" in range) {
+		const length = Math.min(range.suffix, size);
+		const start = Math.max(0, size - length);
+		return { start, end: Math.max(start, size - 1) };
+	}
+
+	const start = Math.min(range.offset ?? 0, Math.max(0, size - 1));
+	const length = range.length ?? Math.max(0, size - start);
+	return {
+		start,
+		end: Math.min(Math.max(0, size - 1), start + Math.max(0, length - 1)),
+	};
 }

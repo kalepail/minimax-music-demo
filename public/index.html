@@ -182,13 +182,14 @@
 
 			const POLL_INTERVAL_MS = 3000;
 			const POLL_TIMEOUT_MS = 15 * 60 * 1000;
+			const JOB_STORAGE_KEY = "minimax-music-demo:last-job";
 
 			instrumentalEl.addEventListener("change", () => {
 				lyricsEl.disabled = instrumentalEl.checked;
 				if (instrumentalEl.checked) lyricsEl.value = "";
 			});
 
-			const existingJobId = readJobFromHash();
+			const existingJobId = readJobFromHash() || readJobFromStorage();
 			if (existingJobId) {
 				button.disabled = true;
 				statusEl.textContent = `Reconnecting to job ${existingJobId}...`;
@@ -232,17 +233,25 @@
 			});
 
 			async function pollJob(jobId) {
-				const started = Date.now();
+				let started = Date.now();
 				sourceEl.textContent = `job_id=${jobId}`;
 				while (Date.now() - started < POLL_TIMEOUT_MS) {
 					const res = await fetch(`/api/status/${jobId}`);
 					const data = await res.json();
-					const elapsed = Math.floor((Date.now() - started) / 1000);
+
+					if (!res.ok) {
+						if (res.status === 404) clearSavedJob(jobId);
+						fail(data.error || `status failed: ${res.status}`);
+						return;
+					}
+
+					started = typeof data.created_at === "number" ? data.created_at : started;
+					const elapsed = Math.max(0, Math.floor((Date.now() - started) / 1000));
 					statusEl.textContent = `state=${data.state ?? "?"} attempts=${data.attempts ?? 0} elapsed=${elapsed}s`;
 					if (data.state === "complete") {
-						player.src = `/api/audio/${jobId}`;
+						player.src = `/api/audio/${jobId}?v=${data.completed_at ?? Date.now()}`;
 						player.style.display = "block";
-						player.play().catch(() => {});
+						player.load();
 						statusEl.textContent = `state=complete attempts=${data.attempts} elapsed=${elapsed}s`;
 						sourceEl.textContent = `job_id=${jobId}`;
 						button.disabled = false;
@@ -281,8 +290,19 @@
 				return id && /^[A-Za-z0-9_-]+$/.test(id) ? id : null;
 			}
 
+			function readJobFromStorage() {
+				const id = window.localStorage.getItem(JOB_STORAGE_KEY);
+				return id && /^[A-Za-z0-9_-]+$/.test(id) ? id : null;
+			}
+
 			function writeJobToHash(id) {
 				window.location.hash = `job=${id}`;
+				window.localStorage.setItem(JOB_STORAGE_KEY, id);
+			}
+
+			function clearSavedJob(id) {
+				const saved = window.localStorage.getItem(JOB_STORAGE_KEY);
+				if (saved === id) window.localStorage.removeItem(JOB_STORAGE_KEY);
 			}
 		</script>
 	</body>

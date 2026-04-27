@@ -5,6 +5,7 @@ import {
 	RATE_LIMIT_WINDOW_MS,
 	STALE_JOB_MS,
 	applyRateLimit,
+	audioObjectKey,
 	audioResponseHeaders,
 	clientRateLimitKey,
 	extractAudioUrl,
@@ -15,6 +16,8 @@ import {
 	publicStatus,
 	shouldCleanUp,
 	snippet,
+	storedAudioResponseHeaders,
+	storedAudioStatus,
 	type AttemptLog,
 	type JobRecord,
 	type MusicInput,
@@ -22,13 +25,14 @@ import {
 } from "./lib";
 
 export class MusicJob extends DurableObject<Env> {
-	async start(input: MusicInput): Promise<void> {
+	async start(input: MusicInput, jobId: string): Promise<void> {
 		const existing = await this.ctx.storage.get<JobRecord>("job");
 		if (existing) return;
 
 		const job: JobRecord = {
 			state: "queued",
 			input,
+			audio_object_key: audioObjectKey(jobId, input.format),
 			attempts: 0,
 			attempt_log: [],
 			created_at: Date.now(),
@@ -63,6 +67,7 @@ export class MusicJob extends DurableObject<Env> {
 		if (!job) return;
 		if (job.state === "complete" || job.state === "failed") {
 			if (shouldCleanUp(job)) {
+				await this.deletePersistedAudio(job);
 				await this.ctx.storage.deleteAll();
 				return;
 			}
@@ -142,13 +147,21 @@ export class MusicJob extends DurableObject<Env> {
 		const attemptEnded = Date.now();
 		const audio = extractAudioUrl(result);
 		const hasAudio = typeof audio === "string" && audio.length > 0;
+		let persistedAudio: { contentType: string; key: string } | undefined;
+		if (hasAudio) {
+			try {
+				persistedAudio = await this.persistAudio(current, audio as string);
+			} catch (err) {
+				errorMsg = err instanceof Error ? err.message : "Audio persistence failed";
+			}
+		}
 
 		const attemptLog: AttemptLog = {
 			attempt: 1,
 			started_at: attemptStarted,
 			ended_at: attemptEnded,
 			duration_ms: attemptEnded - attemptStarted,
-			error: hasAudio ? undefined : errorMsg ?? snippet(result),
+			error: persistedAudio ? undefined : errorMsg ?? snippet(result),
 		};
 		current = { ...current, attempt_log: [...current.attempt_log, attemptLog] };
 		console.log("MusicJob attempt", {
@@ -156,11 +169,13 @@ export class MusicJob extends DurableObject<Env> {
 			error: attemptLog.error,
 		});
 
-		if (hasAudio) {
+		if (persistedAudio) {
 			await this.finalize({
 				...current,
 				state: "complete",
 				audio_url: audio as string,
+				audio_object_key: persistedAudio.key,
+				audio_content_type: persistedAudio.contentType,
 				completed_at: attemptEnded,
 			});
 			return;
@@ -178,6 +193,35 @@ export class MusicJob extends DurableObject<Env> {
 		const expiresAt = Date.now() + JOB_TTL_MS;
 		await this.ctx.storage.put("job", { ...job, expires_at: expiresAt });
 		await this.ctx.storage.setAlarm(expiresAt);
+	}
+
+	private async persistAudio(job: JobRecord, audioUrl: string): Promise<{ contentType: string; key: string }> {
+		const upstream = await fetch(audioUrl);
+		if (!upstream.ok || !upstream.body) {
+			throw new Error(`upstream audio fetch failed before persistence: ${upstream.status}`);
+		}
+
+		const contentType = upstream.headers.get("content-type") ?? (job.input.format === "wav" ? "audio/wav" : "audio/mpeg");
+		const key = job.audio_object_key ?? audioObjectKey(crypto.randomUUID(), job.input.format);
+		await this.env.AUDIO_BUCKET.put(key, upstream.body, {
+			httpMetadata: {
+				cacheControl: "no-store",
+				contentType,
+			},
+		});
+		return { contentType, key };
+	}
+
+	private async deletePersistedAudio(job: JobRecord): Promise<void> {
+		if (!job.audio_object_key) return;
+		try {
+			await this.env.AUDIO_BUCKET.delete(job.audio_object_key);
+		} catch (err) {
+			console.warn("Failed to delete persisted audio", {
+				error: err instanceof Error ? err.message : String(err),
+				key: job.audio_object_key,
+			});
+		}
 	}
 }
 
@@ -232,7 +276,7 @@ async function handleGenerate(request: Request, env: Env): Promise<Response> {
 
 	const jobId = crypto.randomUUID();
 	const stub = env.MUSIC_JOB.get(env.MUSIC_JOB.idFromName(jobId));
-	await stub.start(input);
+	await stub.start(input, jobId);
 	return json({ jobId }, 202);
 }
 
@@ -247,9 +291,23 @@ async function handleAudio(request: Request, jobId: string, env: Env): Promise<R
 	const stub = env.MUSIC_JOB.get(env.MUSIC_JOB.idFromName(jobId));
 	const record = await stub.status();
 	if (!record) return json({ error: "job not found" }, 404);
-	if (record.state !== "complete" || !record.audio_url) {
+	if (record.state !== "complete") {
 		return json({ error: "job not ready", state: record.state }, 409);
 	}
+
+	if (record.audio_object_key) {
+		const object = await env.AUDIO_BUCKET.get(record.audio_object_key, {
+			range: request.headers,
+		});
+		if (object?.body) {
+			return new Response(object.body, {
+				status: storedAudioStatus(object),
+				headers: storedAudioResponseHeaders(record, object),
+			});
+		}
+	}
+
+	if (!record.audio_url) return json({ error: "audio not found" }, 404);
 
 	const upstreamHeaders = new Headers();
 	const range = request.headers.get("Range");

@@ -6,14 +6,18 @@ import {
 	RATE_LIMIT_WINDOW_MS,
 	STALE_JOB_MS,
 	applyRateLimit,
+	audioObjectKey,
 	audioResponseHeaders,
 	clientRateLimitKey,
 	extractAudioUrl,
 	isStaleRunningJob,
 	parseInput,
 	publicStatus,
+	storedAudioResponseHeaders,
+	storedAudioStatus,
 	shouldCleanUp,
 	type JobRecord,
+	type StoredAudioObject,
 } from "./lib";
 
 const baseJob: JobRecord = {
@@ -25,6 +29,8 @@ const baseJob: JobRecord = {
 		lyrics: "private lyrics",
 	},
 	audio_url: "https://example.com/audio.mp3",
+	audio_object_key: "music/job-1.mp3",
+	audio_content_type: "audio/mpeg",
 	attempts: 1,
 	attempt_log: [],
 	created_at: 1,
@@ -170,6 +176,13 @@ describe("extractAudioUrl", () => {
 	});
 });
 
+describe("audioObjectKey", () => {
+	it("creates stable per-job R2 keys", () => {
+		expect(audioObjectKey("job-123", "mp3")).toBe("music/job-123.mp3");
+		expect(audioObjectKey("job-123", "wav")).toBe("music/job-123.wav");
+	});
+});
+
 describe("audioResponseHeaders", () => {
 	it("does not advertise byte ranges unless the upstream does", () => {
 		const upstream = new Response(null, {
@@ -201,6 +214,33 @@ describe("audioResponseHeaders", () => {
 	});
 });
 
+describe("storedAudioResponseHeaders", () => {
+	it("serves whole R2 objects with audio metadata", () => {
+		const object = makeStoredAudioObject({ size: 10 });
+		const headers = storedAudioResponseHeaders(baseJob, object);
+
+		expect(storedAudioStatus(object)).toBe(200);
+		expect(headers.get("Accept-Ranges")).toBe("bytes");
+		expect(headers.get("Cache-Control")).toBe("no-store");
+		expect(headers.get("Content-Length")).toBe("10");
+		expect(headers.get("Content-Type")).toBe("audio/mpeg");
+		expect(headers.get("ETag")).toBe('"etag"');
+		expect(headers.get("Content-Range")).toBeNull();
+	});
+
+	it("serves R2 byte ranges with partial content headers", () => {
+		const object = makeStoredAudioObject({
+			range: { offset: 2, length: 4 },
+			size: 10,
+		});
+		const headers = storedAudioResponseHeaders(baseJob, object);
+
+		expect(storedAudioStatus(object)).toBe(206);
+		expect(headers.get("Content-Length")).toBe("4");
+		expect(headers.get("Content-Range")).toBe("bytes 2-5/10");
+	});
+});
+
 describe("timeout constants", () => {
 	it("keeps the attempt below the 15-minute Durable Object alarm wall-time limit", () => {
 		expect(ATTEMPT_TIMEOUT_MS).toBeLessThan(15 * 60 * 1000);
@@ -208,3 +248,23 @@ describe("timeout constants", () => {
 		expect(JOB_TTL_MS).toBe(60 * 60 * 1000);
 	});
 });
+
+function makeStoredAudioObject({
+	range,
+	size,
+}: {
+	range?: R2Range;
+	size: number;
+}): StoredAudioObject {
+	const httpMetadata = { contentType: "audio/mpeg" };
+	return {
+		body: new ReadableStream(),
+		httpEtag: '"etag"',
+		httpMetadata,
+		range,
+		size,
+		writeHttpMetadata(headers) {
+			headers.set("Content-Type", httpMetadata.contentType);
+		},
+	};
+}
