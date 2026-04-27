@@ -1242,7 +1242,7 @@ async function generateRadioSong(message: RadioGenerateMessage, env: Env): Promi
 	}
 }
 
-async function backfillCoverArt(env: Env, limit: number, regenerate = false): Promise<{ checked: number; generated: number; songs: Array<{ id: string; title: string; cover_art_object_key?: string }> }> {
+async function backfillCoverArt(env: Env, limit: number, regenerate = false): Promise<{ checked: number; generated: number; songs: Array<{ id: string; title: string; cover_art_object_key?: string }>; failures: Array<{ id: string; title: string; error: string }> }> {
 	const rows = await env.DB.prepare(
 		`SELECT id, station_id, title, prompt, cover_art_object_key, cover_art_prompt, cover_art_model,
 			cover_art_created_at, request_id, request_text, lyrics, lyrics_source, music_model, text_model,
@@ -1258,23 +1258,30 @@ async function backfillCoverArt(env: Env, limit: number, regenerate = false): Pr
 	const songs = (rows.results ?? []).map((row) => songFromRow(row, []));
 	let generated = 0;
 	const updated: Array<{ id: string; title: string; cover_art_object_key?: string }> = [];
+	const failures: Array<{ id: string; title: string; error: string }> = [];
 	for (const song of songs) {
-		await generateAndAttachCoverArt(env, song, regenerate);
-		await updateSongCoverArt(env.DB, song);
-		const metadata = await env.AUDIO_BUCKET.get(song.metadata_object_key);
-		if (metadata) {
-			const existing = await metadata.json<Record<string, unknown>>().catch(() => undefined);
-			await env.AUDIO_BUCKET.put(song.metadata_object_key, JSON.stringify({ ...existing, ...song }, null, 2), {
-				httpMetadata: {
-					cacheControl: "public, max-age=3600",
-					contentType: "application/json",
-				},
-			});
+		try {
+			await generateAndAttachCoverArt(env, song, regenerate);
+			await updateSongCoverArt(env.DB, song);
+			const metadata = await env.AUDIO_BUCKET.get(song.metadata_object_key);
+			if (metadata) {
+				const existing = await metadata.json<Record<string, unknown>>().catch(() => undefined);
+				await env.AUDIO_BUCKET.put(song.metadata_object_key, JSON.stringify({ ...existing, ...song }, null, 2), {
+					httpMetadata: {
+						cacheControl: "public, max-age=3600",
+						contentType: "application/json",
+					},
+				});
+			}
+			generated += song.cover_art_object_key ? 1 : 0;
+			updated.push({ id: song.id, title: song.title, cover_art_object_key: song.cover_art_object_key });
+		} catch (err) {
+			const error = err instanceof Error ? err.message : String(err);
+			failures.push({ id: song.id, title: song.title, error });
+			console.warn("Cover backfill failed for song", { song_id: song.id, title: song.title, error });
 		}
-		generated += song.cover_art_object_key ? 1 : 0;
-		updated.push({ id: song.id, title: song.title, cover_art_object_key: song.cover_art_object_key });
 	}
-	return { checked: songs.length, generated, songs: updated };
+	return { checked: songs.length, generated, songs: updated, failures };
 }
 
 async function generateAndAttachCoverArt(env: Env, song: RadioSong, regenerate = false): Promise<void> {
