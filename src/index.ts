@@ -209,7 +209,7 @@ export default {
 
 async function handleGenerate(request: Request, env: Env): Promise<Response> {
 	const demoToken = readDemoToken(env as EnvWithOptionalDemoToken);
-	if (demoToken && !isDemoTokenAuthorized(request, demoToken)) {
+	if (demoToken && !(await isDemoTokenAuthorized(request, demoToken))) {
 		return json({ error: "demo token required" }, 401);
 	}
 

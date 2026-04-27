@@ -1,6 +1,6 @@
 # MiniMax Music 2.6 Demo
 
-A minimal Cloudflare Worker that generates songs with the [MiniMax Music 2.6](https://developers.cloudflare.com/workers-ai/models/) model on Workers AI, served behind a tiny single-page frontend.
+A minimal Cloudflare Worker that generates songs with the [MiniMax Music 2.6](https://developers.cloudflare.com/ai/models/minimax/music-2.6/) model on Workers AI, served behind a tiny single-page frontend.
 
 Generation runs asynchronously: the Worker hands off to a Durable Object, which calls the model through an AI Gateway and stores the result in DO storage for one hour. The browser polls a status endpoint and streams the finished audio through the Worker.
 

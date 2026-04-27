@@ -63,6 +63,12 @@ describe("parseInput", () => {
 		});
 	});
 
+	it("rejects unsupported fields instead of silently dropping them", () => {
+		expect(parseInput({ prompt: "song", sample_rate: 44100 })).toEqual({
+			error: "unsupported field: sample_rate",
+		});
+	});
+
 	it("drops lyrics for instrumental jobs", () => {
 		expect(parseInput({ prompt: "song", is_instrumental: true, lyrics: "ignore me" })).toEqual({
 			prompt: "song",
@@ -108,7 +114,7 @@ describe("job lifecycle helpers", () => {
 		expect(shouldCleanUp({ ...baseJob, state: "running", expires_at: 100 }, 100)).toBe(false);
 	});
 
-	it("detects stale running jobs after the attempt grace period", () => {
+	it("detects stale running jobs at the watchdog deadline", () => {
 		const running: JobRecord = {
 			...baseJob,
 			state: "running",
@@ -117,7 +123,8 @@ describe("job lifecycle helpers", () => {
 			expires_at: undefined,
 		};
 
-		expect(isStaleRunningJob(running, 1000 + STALE_JOB_MS)).toBe(false);
+		expect(isStaleRunningJob(running, 999 + STALE_JOB_MS)).toBe(false);
+		expect(isStaleRunningJob(running, 1000 + STALE_JOB_MS)).toBe(true);
 		expect(isStaleRunningJob(running, 1001 + STALE_JOB_MS)).toBe(true);
 	});
 });
@@ -162,14 +169,17 @@ describe("demo token helpers", () => {
 		expect(readDemoToken({ DEMO_TOKEN: "   " })).toBeUndefined();
 	});
 
-	it("accepts x-demo-token and bearer tokens", () => {
-		expect(isDemoTokenAuthorized(new Request("https://example.com", { headers: { "X-Demo-Token": "secret" } }), "secret")).toBe(
-			true,
-		);
-		expect(isDemoTokenAuthorized(new Request("https://example.com", { headers: { Authorization: "Bearer secret" } }), "secret")).toBe(
-			true,
-		);
-		expect(isDemoTokenAuthorized(new Request("https://example.com"), "secret")).toBe(false);
+	it("accepts x-demo-token and bearer tokens", async () => {
+		await expect(
+			isDemoTokenAuthorized(new Request("https://example.com", { headers: { "X-Demo-Token": "secret" } }), "secret"),
+		).resolves.toBe(true);
+		await expect(
+			isDemoTokenAuthorized(new Request("https://example.com", { headers: { Authorization: "Bearer secret" } }), "secret"),
+		).resolves.toBe(true);
+		await expect(
+			isDemoTokenAuthorized(new Request("https://example.com", { headers: { "X-Demo-Token": "wrong" } }), "secret"),
+		).resolves.toBe(false);
+		await expect(isDemoTokenAuthorized(new Request("https://example.com"), "secret")).resolves.toBe(false);
 	});
 });
 

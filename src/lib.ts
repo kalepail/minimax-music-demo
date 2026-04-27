@@ -53,9 +53,15 @@ export const JOB_TTL_MS = 60 * 60 * 1000;
 export const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
 export const RATE_LIMIT_MAX_JOBS = 3;
 
+const INPUT_FIELDS = new Set(["prompt", "lyrics", "format", "is_instrumental"]);
+const textEncoder = new TextEncoder();
+
 export function parseInput(body: unknown): MusicInput | { error: string } {
 	if (!body || typeof body !== "object") return { error: "body must be a JSON object" };
 	const raw = body as Record<string, unknown>;
+	const unknownField = Object.keys(raw).find((key) => !INPUT_FIELDS.has(key));
+	if (unknownField) return { error: `unsupported field: ${unknownField}` };
+
 	const prompt = typeof raw.prompt === "string" ? raw.prompt.trim() : "";
 	if (!prompt) return { error: "prompt is required" };
 	if (prompt.length > PROMPT_MAX_CHARS) return { error: `prompt must be <= ${PROMPT_MAX_CHARS} chars` };
@@ -86,7 +92,7 @@ export function shouldCleanUp(job: JobRecord, now = Date.now()): boolean {
 }
 
 export function isStaleRunningJob(job: JobRecord, now = Date.now()): boolean {
-	return job.state === "running" && typeof job.started_at === "number" && now - job.started_at > STALE_JOB_MS;
+	return job.state === "running" && typeof job.started_at === "number" && now - job.started_at >= STALE_JOB_MS;
 }
 
 export function applyRateLimit(
@@ -133,13 +139,26 @@ export function readDemoToken(env: { DEMO_TOKEN?: string }): string | undefined 
 	return token || undefined;
 }
 
-export function isDemoTokenAuthorized(request: Request, token: string): boolean {
+export async function isDemoTokenAuthorized(request: Request, token: string): Promise<boolean> {
 	const header = request.headers.get("x-demo-token")?.trim();
-	if (header === token) return true;
+	if (header && (await secureStringEqual(header, token))) return true;
 
 	const auth = request.headers.get("authorization") ?? "";
 	const [scheme, value] = auth.split(/\s+/, 2);
-	return scheme?.toLowerCase() === "bearer" && value === token;
+	return scheme?.toLowerCase() === "bearer" && !!value && (await secureStringEqual(value, token));
+}
+
+async function secureStringEqual(left: string, right: string): Promise<boolean> {
+	const [leftHash, rightHash] = await Promise.all([sha256(left), sha256(right)]);
+	let diff = 0;
+	for (let i = 0; i < leftHash.length; i++) {
+		diff |= leftHash[i] ^ rightHash[i];
+	}
+	return diff === 0;
+}
+
+async function sha256(value: string): Promise<Uint8Array> {
+	return new Uint8Array(await crypto.subtle.digest("SHA-256", textEncoder.encode(value)));
 }
 
 export function clientRateLimitKey(request: Request): string {
