@@ -401,11 +401,12 @@ export class RadioStation extends DurableObject<Env> {
 	}
 
 	private async reconcileRequests(): Promise<{ playlist: RadioSong[]; requests: RadioRequest[]; fulfilled: FulfilledRadioRequest[] }> {
-		const [playlist, requests, fulfilled] = await Promise.all([
+		const [storedPlaylist, requests, fulfilled] = await Promise.all([
 			this.playlist(),
 			this.requests(),
 			this.fulfilledRequests(),
 		]);
+		const playlist = await this.refreshPlaylistCatalog(storedPlaylist);
 		if (requests.length === 0) return { playlist, requests, fulfilled };
 
 		const nextRequests = [...requests];
@@ -448,6 +449,37 @@ export class RadioStation extends DurableObject<Env> {
 
 	private async inFlight(): Promise<RadioInFlight[]> {
 		return (await this.ctx.storage.get<RadioInFlight[]>("in_flight")) ?? [];
+	}
+
+	private async refreshPlaylistCatalog(playlist: RadioSong[]): Promise<RadioSong[]> {
+		if (playlist.length === 0) return playlist;
+		const lastRefresh = (await this.ctx.storage.get<number>("playlist_catalog_refreshed_at")) ?? 0;
+		if (Date.now() - lastRefresh < 60_000) return playlist;
+		try {
+			const catalog = await loadSongsByIds(this.env.DB, playlist.map((song) => song.id));
+			let changed = false;
+			const refreshed = playlist.map((song) => {
+				const stored = catalog.get(song.id);
+				if (!stored) return song;
+				if (
+					stored.title !== song.title ||
+					stored.cover_art_prompt !== song.cover_art_prompt ||
+					stored.cover_art_created_at !== song.cover_art_created_at ||
+					stored.lyrics_source !== song.lyrics_source
+				) {
+					changed = true;
+				}
+				return stored;
+			});
+			await this.ctx.storage.put("playlist_catalog_refreshed_at", Date.now());
+			if (changed) await this.ctx.storage.put("playlist", refreshed);
+			return changed ? refreshed : playlist;
+		} catch (err) {
+			console.warn("Failed to refresh radio playlist from catalog", {
+				error: err instanceof Error ? err.message : String(err),
+			});
+			return playlist;
+		}
 	}
 }
 
@@ -942,6 +974,27 @@ async function listSongs(db: D1Database, query: LibraryQuery): Promise<{ songs: 
 		next_cursor: (rows.results ?? []).length > query.limit ? String(query.cursor + query.limit) : undefined,
 		limit: query.limit,
 	};
+}
+
+async function loadSongsByIds(db: D1Database, songIds: string[]): Promise<Map<string, RadioSong>> {
+	if (songIds.length === 0) return new Map();
+	const placeholders = songIds.map(() => "?").join(", ");
+	const rows = await db.prepare(
+		`SELECT s.id, s.station_id, s.title, s.prompt, s.cover_art_object_key, s.cover_art_prompt,
+			s.cover_art_model, s.cover_art_created_at, s.request_text, s.format, s.audio_object_key,
+			s.request_id, s.lyrics, s.lyrics_source, s.music_model, s.text_model, s.creative_seed,
+			s.creative_axis, s.creative_bpm, s.generation_input_json, s.prompt_plan_json,
+			s.metadata_object_key, s.audio_content_type, s.primary_genre, s.mood, s.energy, s.bpm_min,
+			s.bpm_max, s.vocal_style, s.created_at, s.completed_at, s.duration_ms
+		 FROM songs s
+		 WHERE s.id IN (${placeholders})`,
+	).bind(...songIds).all<SongRow>();
+	const tags = await loadSongTags(db, songIds);
+	const songs = new Map<string, RadioSong>();
+	for (const row of rows.results ?? []) {
+		songs.set(row.id, songFromRow(row, tags.get(row.id) ?? []));
+	}
+	return songs;
 }
 
 function songOrderBy(sort: LibraryQuery["sort"]): string {
