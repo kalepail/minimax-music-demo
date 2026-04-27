@@ -1838,8 +1838,8 @@ function parsePromptPlanObject(parsed: Record<string, unknown>): Partial<RadioPr
 
 function parseLoosePromptPlan(text: string): Partial<RadioPromptPlan> & { tags: string[] } {
 	return {
-		title: looseStringField(text, "title", ["prompt", "primary_genre", "tags", "mood", "energy", "bpm_min", "bpm_max", "vocal_style"])?.slice(0, 120),
-		prompt: looseStringField(text, "prompt", ["primary_genre", "tags", "mood", "energy", "bpm_min", "bpm_max", "vocal_style"])?.slice(0, 2000),
+		title: looseStringField(text, "title", ["prompt", "lyrics", "primary_genre", "tags", "mood", "energy", "bpm_min", "bpm_max", "vocal_style"])?.slice(0, 120),
+		prompt: looseStringField(text, "prompt", ["lyrics", "primary_genre", "tags", "mood", "energy", "bpm_min", "bpm_max", "vocal_style"])?.slice(0, 2000),
 		primary_genre: normalizeFacet(looseStringField(text, "primary_genre", ["tags", "mood", "energy", "bpm_min", "bpm_max", "vocal_style"])),
 		tags: normalizeTags(looseArrayField(text, "tags")).filter((tag) => tag !== "ai radio" && tag !== "original"),
 		mood: normalizeFacet(looseStringField(text, "mood", ["energy", "bpm_min", "bpm_max", "vocal_style"])),
