@@ -8,6 +8,7 @@ import {
 	RADIO_MAX_FULFILLED_REQUESTS,
 	RADIO_MAX_PLAYLIST,
 	RADIO_MAX_REQUESTS,
+	RADIO_COVER_MODEL,
 	RADIO_STATION_ID,
 	RADIO_TARGET_BACKLOG,
 	RADIO_TEXT_MODEL,
@@ -32,6 +33,7 @@ import {
 	parseStationParams,
 	publicStatus,
 	radioAudioObjectKey,
+	radioCoverObjectKey,
 	radioMetadataObjectKey,
 	shouldCleanUp,
 	snippet,
@@ -472,6 +474,9 @@ export default {
 		if (url.pathname === "/api/radio/stations" && request.method === "GET") {
 			return handleRadioStations(env);
 		}
+		if (url.pathname === "/api/radio/backfill-covers" && request.method === "POST") {
+			return handleCoverBackfill(request, env);
+		}
 		if (url.pathname === "/api/library" && request.method === "GET") {
 			return handleLibrary(url, env);
 		}
@@ -482,6 +487,10 @@ export default {
 		const radioAudioMatch = url.pathname.match(/^\/api\/radio\/audio\/([A-Za-z0-9_-]+)$/);
 		if (radioAudioMatch && (request.method === "GET" || request.method === "HEAD")) {
 			return handleRadioAudio(request, radioAudioMatch[1], env);
+		}
+		const radioCoverMatch = url.pathname.match(/^\/api\/radio\/cover\/([A-Za-z0-9_-]+)$/);
+		if (radioCoverMatch && (request.method === "GET" || request.method === "HEAD")) {
+			return handleRadioCover(request, radioCoverMatch[1], env);
 		}
 
 		return env.ASSETS.fetch(request);
@@ -710,7 +719,8 @@ async function handleLibrary(url: URL, env: Env): Promise<Response> {
 
 async function handleLibrarySong(songId: string, env: Env): Promise<Response> {
 	const row = await env.DB.prepare(
-		`SELECT id, station_id, title, prompt, request_id, request_text, format, audio_object_key, metadata_object_key,
+		`SELECT id, station_id, title, prompt, cover_art_object_key, cover_art_prompt, cover_art_model,
+			cover_art_created_at, request_id, request_text, format, audio_object_key, metadata_object_key,
 			audio_content_type, primary_genre, mood, energy, bpm_min, bpm_max, vocal_style,
 			created_at, completed_at, duration_ms
 		 FROM songs
@@ -719,6 +729,24 @@ async function handleLibrarySong(songId: string, env: Env): Promise<Response> {
 	if (!row) return json({ error: "song not found" }, 404);
 	const tags = await loadSongTags(env.DB, [songId]);
 	return json(songFromRow(row, tags.get(songId) ?? []));
+}
+
+async function handleCoverBackfill(request: Request, env: Env): Promise<Response> {
+	const token = (env as Env & { COVER_BACKFILL_TOKEN?: string }).COVER_BACKFILL_TOKEN;
+	if (!token) return json({ error: "cover backfill token not configured" }, 503);
+	if (request.headers.get("Authorization") !== `Bearer ${token}`) {
+		return json({ error: "unauthorized" }, 401);
+	}
+
+	let limit = 5;
+	if (request.headers.get("Content-Type")?.includes("application/json")) {
+		const body = await request.json().catch(() => undefined);
+		if (body && typeof body === "object" && typeof (body as { limit?: unknown }).limit === "number") {
+			limit = Math.max(1, Math.min(10, Math.floor((body as { limit: number }).limit)));
+		}
+	}
+	const result = await backfillCoverArt(env, limit);
+	return json(result, result.generated > 0 ? 202 : 200);
 }
 
 async function handleRadioAudio(request: Request, songId: string, env: Env): Promise<Response> {
@@ -756,11 +784,33 @@ async function handleRadioAudio(request: Request, songId: string, env: Env): Pro
 	});
 }
 
+async function handleRadioCover(request: Request, songId: string, env: Env): Promise<Response> {
+	const row = await env.DB.prepare(
+		`SELECT cover_art_object_key
+		 FROM songs
+		 WHERE id = ?`,
+	).bind(songId).first<{ cover_art_object_key: string | null }>();
+	const key = row?.cover_art_object_key ?? radioCoverObjectKey(songId);
+	const object = await env.AUDIO_BUCKET.get(key);
+	if (!object?.body) return json({ error: "cover not found" }, 404);
+	const headers = new Headers();
+	object.writeHttpMetadata(headers);
+	headers.set("Content-Type", object.httpMetadata?.contentType ?? "image/jpeg");
+	headers.set("Cache-Control", "public, max-age=86400");
+	headers.set("ETag", object.httpEtag);
+	headers.set("Content-Length", String(object.size));
+	return new Response(request.method === "HEAD" ? null : object.body, { headers });
+}
+
 type SongRow = {
 	id: string;
 	station_id: string;
 	title: string;
 	prompt: string;
+	cover_art_object_key: string | null;
+	cover_art_prompt: string | null;
+	cover_art_model: string | null;
+	cover_art_created_at: number | null;
 	request_id: string | null;
 	request_text: string | null;
 	format: MusicInput["format"];
@@ -801,7 +851,8 @@ async function listSongs(db: D1Database, query: LibraryQuery): Promise<{ songs: 
 	const orderBy = songOrderBy(query.sort);
 	const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
 	const rows = await db.prepare(
-		`SELECT s.id, s.station_id, s.title, s.prompt, s.request_text, s.format, s.audio_object_key,
+		`SELECT s.id, s.station_id, s.title, s.prompt, s.cover_art_object_key, s.cover_art_prompt,
+			s.cover_art_model, s.cover_art_created_at, s.request_text, s.format, s.audio_object_key,
 			s.request_id, s.metadata_object_key, s.audio_content_type, s.primary_genre, s.mood, s.energy, s.bpm_min,
 			s.bpm_max, s.vocal_style, s.created_at, s.completed_at, s.duration_ms
 		 FROM songs s
@@ -857,6 +908,10 @@ function songFromRow(row: SongRow, tags: string[]): RadioSong {
 		station_id: row.station_id,
 		title: row.title,
 		prompt: row.prompt,
+		cover_art_object_key: row.cover_art_object_key ?? undefined,
+		cover_art_prompt: row.cover_art_prompt ?? undefined,
+		cover_art_model: row.cover_art_model ?? undefined,
+		cover_art_created_at: row.cover_art_created_at ?? undefined,
 		request_id: row.request_id ?? undefined,
 		request_text: row.request_text ?? undefined,
 		format: row.format,
@@ -890,15 +945,20 @@ async function persistSongCatalog(db: D1Database, song: RadioSong): Promise<void
 	const statements = [
 		db.prepare(
 			`INSERT INTO songs (
-				id, station_id, title, prompt, request_id, request_text, format, audio_object_key, metadata_object_key,
+				id, station_id, title, prompt, cover_art_object_key, cover_art_prompt, cover_art_model,
+				cover_art_created_at, request_id, request_text, format, audio_object_key, metadata_object_key,
 				audio_content_type, primary_genre, mood, energy, bpm_min, bpm_max, vocal_style,
 				created_at, completed_at, duration_ms
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(id) DO UPDATE SET
 				station_id = excluded.station_id,
 				title = excluded.title,
 				prompt = excluded.prompt,
+				cover_art_object_key = excluded.cover_art_object_key,
+				cover_art_prompt = excluded.cover_art_prompt,
+				cover_art_model = excluded.cover_art_model,
+				cover_art_created_at = excluded.cover_art_created_at,
 				request_id = excluded.request_id,
 				request_text = excluded.request_text,
 				format = excluded.format,
@@ -919,6 +979,10 @@ async function persistSongCatalog(db: D1Database, song: RadioSong): Promise<void
 			song.station_id,
 			song.title,
 			song.prompt,
+			song.cover_art_object_key ?? null,
+			song.cover_art_prompt ?? null,
+			song.cover_art_model ?? null,
+			song.cover_art_created_at ?? null,
 			song.request_id ?? null,
 			song.request_text ?? null,
 			song.format,
@@ -1043,6 +1107,7 @@ async function generateRadioSong(message: RadioGenerateMessage, env: Env): Promi
 			completed_at: completed,
 			duration_ms: completed - started,
 		};
+		await generateAndAttachCoverArt(env, song);
 		await env.AUDIO_BUCKET.put(metadataObjectKey, JSON.stringify(song, null, 2), {
 			httpMetadata: {
 				cacheControl: "public, max-age=3600",
@@ -1054,6 +1119,114 @@ async function generateRadioSong(message: RadioGenerateMessage, env: Env): Promi
 	} catch (err) {
 		throw err;
 	}
+}
+
+async function backfillCoverArt(env: Env, limit: number): Promise<{ checked: number; generated: number; songs: Array<{ id: string; title: string; cover_art_object_key?: string }> }> {
+	const rows = await env.DB.prepare(
+		`SELECT id, station_id, title, prompt, cover_art_object_key, cover_art_prompt, cover_art_model,
+			cover_art_created_at, request_id, request_text, format, audio_object_key, metadata_object_key,
+			audio_content_type, primary_genre, mood, energy, bpm_min, bpm_max, vocal_style,
+			created_at, completed_at, duration_ms
+		 FROM songs
+		 WHERE cover_art_object_key IS NULL OR cover_art_object_key = ''
+		 ORDER BY completed_at DESC
+		 LIMIT ?`,
+	).bind(limit).all<SongRow>();
+
+	const songs = (rows.results ?? []).map((row) => songFromRow(row, []));
+	let generated = 0;
+	const updated: Array<{ id: string; title: string; cover_art_object_key?: string }> = [];
+	for (const song of songs) {
+		await generateAndAttachCoverArt(env, song);
+		await updateSongCoverArt(env.DB, song);
+		const metadata = await env.AUDIO_BUCKET.get(song.metadata_object_key);
+		if (metadata) {
+			const existing = await metadata.json<Record<string, unknown>>().catch(() => undefined);
+			await env.AUDIO_BUCKET.put(song.metadata_object_key, JSON.stringify({ ...existing, ...song }, null, 2), {
+				httpMetadata: {
+					cacheControl: "public, max-age=3600",
+					contentType: "application/json",
+				},
+			});
+		}
+		generated += song.cover_art_object_key ? 1 : 0;
+		updated.push({ id: song.id, title: song.title, cover_art_object_key: song.cover_art_object_key });
+	}
+	return { checked: songs.length, generated, songs: updated };
+}
+
+async function generateAndAttachCoverArt(env: Env, song: RadioSong): Promise<void> {
+	if (song.cover_art_object_key) return;
+	const prompt = coverArtPrompt(song);
+	const response = await env.AI.run(
+		RADIO_COVER_MODEL,
+		{
+			prompt,
+			steps: 4,
+			seed: hashString(song.id),
+		},
+		{
+			gateway: {
+				id: env.AI_GATEWAY_ID,
+				requestTimeoutMs: 60_000,
+				retries: { maxAttempts: 1 },
+			},
+			signal: AbortSignal.timeout(60_000),
+		},
+	);
+	const image = extractBase64Image(response);
+	if (!image) throw new Error(`Cover art model returned no image: ${snippet(response) ?? "empty response"}`);
+	const key = radioCoverObjectKey(song.id);
+	await env.AUDIO_BUCKET.put(key, base64ToBytes(image), {
+		httpMetadata: {
+			cacheControl: "public, max-age=86400",
+			contentType: "image/jpeg",
+		},
+		customMetadata: {
+			model: RADIO_COVER_MODEL,
+			song_id: song.id,
+		},
+	});
+	song.cover_art_object_key = key;
+	song.cover_art_prompt = prompt;
+	song.cover_art_model = RADIO_COVER_MODEL;
+	song.cover_art_created_at = Date.now();
+}
+
+async function updateSongCoverArt(db: D1Database, song: RadioSong): Promise<void> {
+	await db.prepare(
+		`UPDATE songs
+		 SET cover_art_object_key = ?, cover_art_prompt = ?, cover_art_model = ?, cover_art_created_at = ?
+		 WHERE id = ?`,
+	).bind(
+		song.cover_art_object_key ?? null,
+		song.cover_art_prompt ?? null,
+		song.cover_art_model ?? null,
+		song.cover_art_created_at ?? null,
+		song.id,
+	).run();
+}
+
+function coverArtPrompt(song: RadioSong): string {
+	const tags = song.tags.length > 0 ? song.tags.slice(0, 5).join(", ") : "experimental radio";
+	const genre = song.primary_genre ?? "genre-fluid pop";
+	const mood = song.mood ?? "cinematic";
+	return `Square album cover artwork for an AI radio song titled "${song.title}". ${genre}, ${mood}, ${tags}. Visualize the sound world: ${song.prompt.slice(0, 420)}. Bold editorial music artwork, tactile texture, striking central composition, rich color contrast, no words, no typography, no logos, no artist names, no UI, no watermark.`;
+}
+
+function extractBase64Image(value: unknown): string | undefined {
+	if (!value) return undefined;
+	if (typeof value === "string") return value;
+	if (value instanceof ReadableStream) return undefined;
+	if (typeof value !== "object") return undefined;
+	const image = (value as { image?: unknown }).image;
+	return typeof image === "string" && image ? image : undefined;
+}
+
+function base64ToBytes(value: string): Uint8Array {
+	const base64 = value.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, "");
+	const binary = atob(base64);
+	return Uint8Array.from(binary, (char) => char.charCodeAt(0));
 }
 
 async function createRadioPrompt(
@@ -1148,6 +1321,10 @@ function normalizeStoredRadioSong(song: Partial<RadioSong>, message: RadioGenera
 		station_id: typeof song.station_id === "string" && song.station_id ? song.station_id : message.station_id,
 		title: typeof song.title === "string" && song.title ? song.title : "Untitled Signal",
 		prompt: typeof song.prompt === "string" && song.prompt ? song.prompt : fallbackRadioPrompt(message).prompt,
+		cover_art_object_key: typeof song.cover_art_object_key === "string" && song.cover_art_object_key ? song.cover_art_object_key : undefined,
+		cover_art_prompt: typeof song.cover_art_prompt === "string" && song.cover_art_prompt ? song.cover_art_prompt : undefined,
+		cover_art_model: typeof song.cover_art_model === "string" && song.cover_art_model ? song.cover_art_model : undefined,
+		cover_art_created_at: typeof song.cover_art_created_at === "number" ? song.cover_art_created_at : undefined,
 		request_id: typeof song.request_id === "string" && song.request_id ? song.request_id : message.request_id,
 		request_text: typeof song.request_text === "string" ? song.request_text : message.request_text,
 		format: song.format === "wav" ? "wav" : "mp3",

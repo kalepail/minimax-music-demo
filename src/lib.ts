@@ -31,6 +31,10 @@ export type RadioSong = {
 	station_id: string;
 	title: string;
 	prompt: string;
+	cover_art_object_key?: string;
+	cover_art_prompt?: string;
+	cover_art_model?: string;
+	cover_art_created_at?: number;
 	request_id?: string;
 	request_text?: string;
 	format: MusicInput["format"];
@@ -174,6 +178,7 @@ export const RADIO_REQUEST_MAX_CHARS = 500;
 export const RADIO_IN_FLIGHT_STALE_MS = 45 * 60 * 1000;
 export const RADIO_MAX_QUEUE_ATTEMPTS = 3;
 export const RADIO_TEXT_MODEL = "@cf/meta/llama-3.1-8b-instruct-fast";
+export const RADIO_COVER_MODEL = "@cf/black-forest-labs/flux-1-schnell";
 export const LIBRARY_MAX_LIMIT = 100;
 export const LIBRARY_DEFAULT_LIMIT = 25;
 
@@ -298,6 +303,10 @@ export function radioAudioObjectKey(songId: string, format: MusicInput["format"]
 
 export function radioMetadataObjectKey(songId: string): string {
 	return `radio/metadata/${songId}.json`;
+}
+
+export function radioCoverObjectKey(songId: string): string {
+	return `radio/covers/${songId}.jpg`;
 }
 
 export function genreStationId(genre: string): string {

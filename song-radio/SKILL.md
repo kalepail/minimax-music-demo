@@ -40,6 +40,7 @@ When asked to keep a station filled:
    - Run a text model to turn that brief into a compact, vivid MiniMax prompt.
    - Call the music model.
    - Stream the returned audio URL into R2.
+   - Generate square cover art with a Workers AI text-to-image model and store it in R2.
    - Store a small metadata JSON record in R2.
    - Insert or update a D1 catalog row and tag rows.
    - Notify the station Durable Object so the playlist updates.
@@ -87,6 +88,8 @@ Prefer these route shapes when building a web UI:
 - `POST /api/radio/fill` manually tops up the station queue.
 - `GET /api/radio/stations` returns D1-backed stations and genre counts.
 - `GET /api/radio/audio/:songId` streams a stored R2 object with byte-range support.
+- `GET /api/radio/cover/:songId` serves generated cover art from R2.
+- `POST /api/radio/backfill-covers` generates missing covers. Protect it with a Worker secret.
 - `GET /api/library` returns D1-backed song pages with `limit`, `cursor`, `sort`, `genre`, `tag`, `mood`, and `station_id` filters.
 - `GET /api/library/:songId` returns one song record with tags.
 
