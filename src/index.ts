@@ -9,6 +9,7 @@ import {
 	RADIO_MAX_PLAYLIST,
 	RADIO_MAX_REQUESTS,
 	RADIO_COVER_MODEL,
+	RADIO_MUSIC_MODEL,
 	RADIO_STATION_ID,
 	RADIO_TARGET_BACKLOG,
 	RADIO_TEXT_MODEL,
@@ -720,7 +721,7 @@ async function handleRadioStatus(env: Env, request?: Request): Promise<Response>
 	const url = request ? new URL(request.url) : new URL("https://local/");
 	const station = parseStationParams(url);
 	if ("error" in station) return json(station, 400);
-	const status = await radioStation(env, station.station_id).status();
+	const status = await radioStation(env, station.station_id).status() as RadioStatus;
 	return json({ ...status, station_id: station.station_id, genre: station.genre });
 }
 
@@ -787,8 +788,9 @@ async function handleLibrary(url: URL, env: Env): Promise<Response> {
 async function handleLibrarySong(songId: string, env: Env): Promise<Response> {
 	const row = await env.DB.prepare(
 		`SELECT id, station_id, title, prompt, cover_art_object_key, cover_art_prompt, cover_art_model,
-			cover_art_created_at, request_id, request_text, format, audio_object_key, metadata_object_key,
-			audio_content_type, primary_genre, mood, energy, bpm_min, bpm_max, vocal_style,
+			cover_art_created_at, request_id, request_text, lyrics, lyrics_source, music_model, text_model,
+			creative_seed, creative_axis, creative_bpm, generation_input_json, prompt_plan_json,
+			format, audio_object_key, metadata_object_key, audio_content_type, primary_genre, mood, energy, bpm_min, bpm_max, vocal_style,
 			created_at, completed_at, duration_ms
 		 FROM songs
 		 WHERE id = ?`,
@@ -884,6 +886,15 @@ type SongRow = {
 	cover_art_created_at: number | null;
 	request_id: string | null;
 	request_text: string | null;
+	lyrics: string | null;
+	lyrics_source: string | null;
+	music_model: string | null;
+	text_model: string | null;
+	creative_seed: string | null;
+	creative_axis: string | null;
+	creative_bpm: number | null;
+	generation_input_json: string | null;
+	prompt_plan_json: string | null;
 	format: MusicInput["format"];
 	audio_object_key: string;
 	metadata_object_key: string;
@@ -924,7 +935,9 @@ async function listSongs(db: D1Database, query: LibraryQuery): Promise<{ songs: 
 	const rows = await db.prepare(
 		`SELECT s.id, s.station_id, s.title, s.prompt, s.cover_art_object_key, s.cover_art_prompt,
 			s.cover_art_model, s.cover_art_created_at, s.request_text, s.format, s.audio_object_key,
-			s.request_id, s.metadata_object_key, s.audio_content_type, s.primary_genre, s.mood, s.energy, s.bpm_min,
+			s.request_id, s.lyrics, s.lyrics_source, s.music_model, s.text_model, s.creative_seed,
+			s.creative_axis, s.creative_bpm, s.generation_input_json, s.prompt_plan_json,
+			s.metadata_object_key, s.audio_content_type, s.primary_genre, s.mood, s.energy, s.bpm_min,
 			s.bpm_max, s.vocal_style, s.created_at, s.completed_at, s.duration_ms
 		 FROM songs s
 		 ${whereSql}
@@ -985,6 +998,15 @@ function songFromRow(row: SongRow, tags: string[]): RadioSong {
 		cover_art_created_at: row.cover_art_created_at ?? undefined,
 		request_id: row.request_id ?? undefined,
 		request_text: row.request_text ?? undefined,
+		lyrics: row.lyrics ?? undefined,
+		lyrics_source: row.lyrics_source ?? undefined,
+		music_model: row.music_model ?? undefined,
+		text_model: row.text_model ?? undefined,
+		creative_seed: row.creative_seed ?? undefined,
+		creative_axis: row.creative_axis ?? undefined,
+		creative_bpm: row.creative_bpm ?? undefined,
+		generation_input: parseJsonRecord(row.generation_input_json),
+		prompt_plan: parseJsonRecord(row.prompt_plan_json) as RadioPromptPlan | undefined,
 		format: row.format,
 		audio_object_key: row.audio_object_key,
 		metadata_object_key: row.metadata_object_key,
@@ -1000,6 +1022,16 @@ function songFromRow(row: SongRow, tags: string[]): RadioSong {
 		completed_at: row.completed_at,
 		duration_ms: row.duration_ms,
 	};
+}
+
+function parseJsonRecord(value: string | null): Record<string, unknown> | undefined {
+	if (!value) return undefined;
+	try {
+		const parsed = JSON.parse(value) as unknown;
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 async function persistSongCatalog(db: D1Database, song: RadioSong): Promise<void> {
@@ -1019,9 +1051,11 @@ async function persistSongCatalog(db: D1Database, song: RadioSong): Promise<void
 				id, station_id, title, prompt, cover_art_object_key, cover_art_prompt, cover_art_model,
 				cover_art_created_at, request_id, request_text, format, audio_object_key, metadata_object_key,
 				audio_content_type, primary_genre, mood, energy, bpm_min, bpm_max, vocal_style,
+				lyrics, lyrics_source, music_model, text_model, creative_seed, creative_axis, creative_bpm,
+				generation_input_json, prompt_plan_json,
 				created_at, completed_at, duration_ms
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(id) DO UPDATE SET
 				station_id = excluded.station_id,
 				title = excluded.title,
@@ -1042,6 +1076,15 @@ async function persistSongCatalog(db: D1Database, song: RadioSong): Promise<void
 				bpm_min = excluded.bpm_min,
 				bpm_max = excluded.bpm_max,
 				vocal_style = excluded.vocal_style,
+				lyrics = excluded.lyrics,
+				lyrics_source = excluded.lyrics_source,
+				music_model = excluded.music_model,
+				text_model = excluded.text_model,
+				creative_seed = excluded.creative_seed,
+				creative_axis = excluded.creative_axis,
+				creative_bpm = excluded.creative_bpm,
+				generation_input_json = excluded.generation_input_json,
+				prompt_plan_json = excluded.prompt_plan_json,
 				created_at = excluded.created_at,
 				completed_at = excluded.completed_at,
 				duration_ms = excluded.duration_ms`,
@@ -1066,6 +1109,15 @@ async function persistSongCatalog(db: D1Database, song: RadioSong): Promise<void
 			song.bpm_min ?? null,
 			song.bpm_max ?? null,
 			song.vocal_style ?? null,
+			song.lyrics ?? null,
+			song.lyrics_source ?? null,
+			song.music_model ?? null,
+			song.text_model ?? null,
+			song.creative_seed ?? null,
+			song.creative_axis ?? null,
+			song.creative_bpm ?? null,
+			song.generation_input ? JSON.stringify(song.generation_input) : null,
+			song.prompt_plan ? JSON.stringify(song.prompt_plan) : null,
 			song.created_at,
 			song.completed_at,
 			song.duration_ms,
@@ -1115,14 +1167,16 @@ async function generateRadioSong(message: RadioGenerateMessage, env: Env): Promi
 			});
 			return fallbackRadioPrompt(message);
 		});
+		const lyrics = plan.lyrics?.trim() || fallbackLyrics(plan, message);
 		const aiInput: Record<string, unknown> = {
 			prompt: plan.prompt,
 			is_instrumental: false,
 			format: message.format,
-			lyrics_optimizer: true,
+			lyrics_optimizer: false,
+			lyrics,
 		};
 		const result = await env.AI.run(
-			"minimax/music-2.6",
+			RADIO_MUSIC_MODEL,
 			aiInput,
 			{
 				gateway: {
@@ -1163,6 +1217,15 @@ async function generateRadioSong(message: RadioGenerateMessage, env: Env): Promi
 			prompt: plan.prompt,
 			request_id: message.request_id,
 			request_text: message.request_text,
+			lyrics,
+			lyrics_source: plan.lyrics ? "workers-ai-text-model" : "fallback-template",
+			music_model: RADIO_MUSIC_MODEL,
+			text_model: RADIO_TEXT_MODEL,
+			creative_seed: message.creative_seed,
+			creative_axis: message.creative_axis,
+			creative_bpm: message.creative_bpm,
+			generation_input: aiInput,
+			prompt_plan: plan,
 			format: message.format,
 			audio_object_key: audioObjectKey,
 			metadata_object_key: metadataObjectKey,
@@ -1195,8 +1258,9 @@ async function generateRadioSong(message: RadioGenerateMessage, env: Env): Promi
 async function backfillCoverArt(env: Env, limit: number, regenerate = false): Promise<{ checked: number; generated: number; songs: Array<{ id: string; title: string; cover_art_object_key?: string }> }> {
 	const rows = await env.DB.prepare(
 		`SELECT id, station_id, title, prompt, cover_art_object_key, cover_art_prompt, cover_art_model,
-			cover_art_created_at, request_id, request_text, format, audio_object_key, metadata_object_key,
-			audio_content_type, primary_genre, mood, energy, bpm_min, bpm_max, vocal_style,
+			cover_art_created_at, request_id, request_text, lyrics, lyrics_source, music_model, text_model,
+			creative_seed, creative_axis, creative_bpm, generation_input_json, prompt_plan_json,
+			format, audio_object_key, metadata_object_key, audio_content_type, primary_genre, mood, energy, bpm_min, bpm_max, vocal_style,
 			created_at, completed_at, duration_ms
 		 FROM songs
 		 WHERE cover_art_object_key IS NULL OR cover_art_object_key = '' OR cover_art_model IS NULL OR cover_art_model != ? OR ? = 1
@@ -1352,7 +1416,7 @@ async function createRadioPrompt(
 				{
 					role: "system",
 					content:
-						"You are a music director for an always-on AI radio station. Return compact JSON only. Required string fields: title, prompt. Optional catalog fields: primary_genre, tags array, mood, energy 1-10, bpm_min, bpm_max, vocal_style. Every song must feel meaningfully different from adjacent generations. The title must be original, specific, and not reused. The prompt must be original, richly musical, and suitable for a text-to-music model.",
+						"You are a music director and lyricist for an always-on AI radio station. Return compact JSON only. Required string fields: title, prompt, lyrics. Optional catalog fields: primary_genre, tags array, mood, energy 1-10, bpm_min, bpm_max, vocal_style. Every song must feel meaningfully different from adjacent generations. The title must be original, specific, and not reused. The prompt must be original, richly musical, and suitable for a text-to-music model. Lyrics must be original singable lines, not a restatement of the title or prompt.",
 				},
 				{
 					role: "user",
@@ -1364,7 +1428,7 @@ Tempo center: around ${message.creative_bpm} BPM
 Song ID entropy: ${message.song_id}
 ${recentTitleInstruction}
 
-Create one surprising station-ready song concept. Avoid references to specific copyrighted songs or direct artist imitation. Do not use generic titles like Echoflux, Open Frequency, Untitled Signal, or Signal Drift. Keep the prompt under 1200 characters. Add useful genre/tags/mood metadata for library filtering.`,
+Create one surprising station-ready song concept. Avoid references to specific copyrighted songs or direct artist imitation. Do not use generic titles like Echoflux, Open Frequency, Untitled Signal, or Signal Drift. Keep the prompt under 1200 characters. Write 8-16 lines of original lyrics with verse/chorus shape, separated by \\n, under 1800 characters. Add useful genre/tags/mood metadata for library filtering.`,
 				},
 			],
 		},
@@ -1385,6 +1449,7 @@ Create one surprising station-ready song concept. Avoid references to specific c
 	return {
 		title,
 		prompt: parsed.prompt || fallback.prompt,
+		lyrics: parsed.lyrics || fallback.lyrics,
 		primary_genre: parsed.primary_genre || fallback.primary_genre,
 		tags: parsed.tags.length > 0 ? parsed.tags : fallback.tags,
 		mood: parsed.mood || fallback.mood,
@@ -1431,6 +1496,15 @@ function normalizeStoredRadioSong(song: Partial<RadioSong>, message: RadioGenera
 		cover_art_created_at: typeof song.cover_art_created_at === "number" ? song.cover_art_created_at : undefined,
 		request_id: typeof song.request_id === "string" && song.request_id ? song.request_id : message.request_id,
 		request_text: typeof song.request_text === "string" ? song.request_text : message.request_text,
+		lyrics: typeof song.lyrics === "string" && song.lyrics ? song.lyrics : undefined,
+		lyrics_source: typeof song.lyrics_source === "string" && song.lyrics_source ? song.lyrics_source : undefined,
+		music_model: typeof song.music_model === "string" && song.music_model ? song.music_model : RADIO_MUSIC_MODEL,
+		text_model: typeof song.text_model === "string" && song.text_model ? song.text_model : RADIO_TEXT_MODEL,
+		creative_seed: typeof song.creative_seed === "string" && song.creative_seed ? song.creative_seed : message.creative_seed,
+		creative_axis: typeof song.creative_axis === "string" && song.creative_axis ? song.creative_axis : message.creative_axis,
+		creative_bpm: typeof song.creative_bpm === "number" ? song.creative_bpm : message.creative_bpm,
+		generation_input: song.generation_input && typeof song.generation_input === "object" ? song.generation_input : undefined,
+		prompt_plan: song.prompt_plan && typeof song.prompt_plan === "object" ? song.prompt_plan : undefined,
 		format: song.format === "wav" ? "wav" : "mp3",
 		audio_object_key: typeof song.audio_object_key === "string" && song.audio_object_key ? song.audio_object_key : radioAudioObjectKey(message.song_id, message.format),
 		metadata_object_key: typeof song.metadata_object_key === "string" && song.metadata_object_key ? song.metadata_object_key : radioMetadataObjectKey(message.song_id),
@@ -1458,6 +1532,7 @@ function fallbackRadioPrompt(message: RadioGenerateMessage): RadioPromptPlan {
 	return {
 		title,
 		prompt: `${seed} ${message.genre ? `Shape it for ${message.genre} radio.` : ""} Creative seed: ${message.creative_seed}. Contrast axis: ${message.creative_axis}. Tempo center: ${message.creative_bpm} BPM. Make a polished, original 2-3 minute song with a strong hook, clear genre fusion, specific instrumentation, vocal direction, production texture, rhythmic motion, and emotional arc. Include an ear-catching intro, a memorable chorus, a dynamic bridge, and a satisfying outro. Avoid direct artist imitation and avoid quoting existing songs.`,
+		lyrics: fallbackLyricsFromText(request ?? message.creative_seed ?? "radio signal", genre),
 		primary_genre: genre,
 		tags: normalizeTags([genre, "ai radio", message.creative_axis, request ?? "original"]),
 		mood: "surprising",
@@ -1466,6 +1541,25 @@ function fallbackRadioPrompt(message: RadioGenerateMessage): RadioPromptPlan {
 		bpm_max: Math.min(240, message.creative_bpm + 8),
 		vocal_style: "expressive lead vocal with memorable hook",
 	};
+}
+
+function fallbackLyrics(plan: RadioPromptPlan, message: RadioGenerateMessage): string {
+	const source = message.request_text?.trim() || plan.title || message.creative_seed || "midnight radio";
+	return fallbackLyricsFromText(source, plan.primary_genre ?? message.genre ?? "radio");
+}
+
+function fallbackLyricsFromText(source: string, genre: string): string {
+	const clean = source.replace(/[^\w\s-]/g, "").split(/\s+/).filter(Boolean).slice(0, 6).join(" ") || "signal in the dark";
+	return [
+		`Verse: I caught ${clean} on a wire in the rain`,
+		`It hummed like ${genre} through the window pane`,
+		"Hands on the rhythm, heart on the line",
+		"Every little echo turning into a sign",
+		`Chorus: We ride the sound until the morning breaks`,
+		"Light in the static, fire in the bass",
+		"Say what you came for, let the night reply",
+		"We become the song as it climbs the sky",
+	].join("\n").slice(0, 1800);
 }
 
 function creativeDirection(songId: string, index: number, genre?: string, request?: string): { axis: string; bpm: number; seed: string } {
@@ -1521,6 +1615,7 @@ function parsePromptPlan(text: string): Partial<RadioPromptPlan> & { tags: strin
 		return {
 			title: typeof parsed.title === "string" ? parsed.title.trim().slice(0, 120) : undefined,
 			prompt: typeof parsed.prompt === "string" ? parsed.prompt.trim().slice(0, 2000) : undefined,
+			lyrics: typeof parsed.lyrics === "string" ? parsed.lyrics.trim().slice(0, 3500) : undefined,
 			primary_genre: normalizeFacet(parsed.primary_genre),
 			tags: normalizeTags(parsed.tags),
 			mood: normalizeFacet(parsed.mood),

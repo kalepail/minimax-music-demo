@@ -39,6 +39,15 @@ export type RadioSong = {
 	cover_art_created_at?: number;
 	request_id?: string;
 	request_text?: string;
+	lyrics?: string;
+	lyrics_source?: string;
+	music_model?: string;
+	text_model?: string;
+	creative_seed?: string;
+	creative_axis?: string;
+	creative_bpm?: number;
+	generation_input?: Record<string, unknown>;
+	prompt_plan?: RadioPromptPlan;
 	format: MusicInput["format"];
 	audio_object_key: string;
 	metadata_object_key: string;
@@ -58,6 +67,7 @@ export type RadioSong = {
 export type RadioPromptPlan = {
 	title: string;
 	prompt: string;
+	lyrics?: string;
 	primary_genre?: string;
 	tags: string[];
 	mood?: string;
@@ -180,6 +190,7 @@ export const RADIO_REQUEST_MAX_CHARS = 500;
 export const RADIO_IN_FLIGHT_STALE_MS = 45 * 60 * 1000;
 export const RADIO_MAX_QUEUE_ATTEMPTS = 3;
 export const RADIO_TEXT_MODEL = "@cf/meta/llama-3.1-8b-instruct-fast";
+export const RADIO_MUSIC_MODEL = "minimax/music-2.6";
 export const RADIO_COVER_MODEL = "@cf/bytedance/stable-diffusion-xl-lightning";
 export const LIBRARY_MAX_LIMIT = 100;
 export const LIBRARY_DEFAULT_LIMIT = 25;

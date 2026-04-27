@@ -274,6 +274,54 @@
 			#stationPlayer {
 				margin-top: 8px;
 			}
+			.song-detail {
+				border: 1px solid var(--border);
+				border-radius: 8px;
+				background: #0b0f17;
+				margin-top: 10px;
+				padding: 12px;
+				display: grid;
+				gap: 10px;
+			}
+			.song-detail:empty {
+				display: none;
+			}
+			.detail-grid {
+				display: grid;
+				grid-template-columns: repeat(2, minmax(0, 1fr));
+				gap: 8px;
+			}
+			.detail-field {
+				border: 1px solid var(--border);
+				border-radius: 8px;
+				padding: 8px;
+				min-width: 0;
+			}
+			.detail-label {
+				color: var(--muted);
+				font-size: 11px;
+				text-transform: uppercase;
+				letter-spacing: 0.04em;
+			}
+			.detail-value,
+			.song-detail pre {
+				color: var(--text);
+				font-size: 12px;
+				line-height: 1.45;
+				white-space: pre-wrap;
+				overflow-wrap: anywhere;
+				margin: 3px 0 0;
+			}
+			.song-detail details {
+				border-top: 1px solid var(--border);
+				padding-top: 8px;
+			}
+			.song-detail summary {
+				cursor: pointer;
+				color: var(--text);
+				font-weight: 700;
+				font-size: 13px;
+			}
 			@media (max-width: 760px) {
 				main {
 					margin-top: 24px;
@@ -283,6 +331,9 @@
 				}
 				.control-strip,
 				.library-grid {
+					grid-template-columns: 1fr;
+				}
+				.detail-grid {
 					grid-template-columns: 1fr;
 				}
 				.song-list,
@@ -368,6 +419,7 @@
 					</div>
 					<audio id="stationPlayer" controls preload="none"></audio>
 					<div id="nowPlaying" class="status">Loading station...</div>
+					<div id="nowPlayingDetails" class="song-detail"></div>
 					<button type="button" id="fillRadio" class="secondary">Fill station queue</button>
 					<div id="playlist" class="song-list"></div>
 				</section>
@@ -429,6 +481,7 @@
 			const sourceEl = document.getElementById("source");
 			const stationPlayer = document.getElementById("stationPlayer");
 			const nowPlayingEl = document.getElementById("nowPlaying");
+			const nowPlayingDetailsEl = document.getElementById("nowPlayingDetails");
 			const radioCountEl = document.getElementById("radioCount");
 			const radioInflightEl = document.getElementById("radioInflight");
 			const radioTargetEl = document.getElementById("radioTarget");
@@ -800,6 +853,7 @@
 				stationPlayer.dataset.songId = song.id;
 				stationPlayer.src = `/api/radio/audio/${song.id}?v=${song.completed_at || Date.now()}`;
 				nowPlayingEl.textContent = `Now playing: ${song.title || "Untitled Signal"}`;
+				renderSongDetails(nowPlayingDetailsEl, song);
 				stationPlayer.load();
 				if (autoplay) stationPlayer.play().catch(() => {});
 			}
@@ -855,9 +909,76 @@
 					}
 					body.append(tags);
 				}
+				const details = document.createElement("details");
+				details.className = "song-detail";
+				const summary = document.createElement("summary");
+				summary.textContent = "Generation details";
+				details.append(summary);
+				renderSongDetails(details, song, true);
+				body.append(details);
 				body.append(play);
 				item.append(body);
 				return item;
+			}
+
+			function renderSongDetails(container, song, append = false) {
+				if (!append) container.innerHTML = "";
+				const grid = document.createElement("div");
+				grid.className = "detail-grid";
+				addDetail(grid, "User request", song.request_text || "No listener request; station-generated.");
+				addDetail(grid, "AI title", song.title || "Untitled Signal");
+				addDetail(grid, "Genre / mood", [song.primary_genre, song.mood].filter(Boolean).join(" / ") || "Not stored");
+				addDetail(grid, "Energy / tempo", [
+					typeof song.energy === "number" ? `energy ${song.energy}` : "",
+					tempoText(song),
+				].filter(Boolean).join(" / ") || "Not stored");
+				addDetail(grid, "Vocal style", song.vocal_style || "Not stored");
+				addDetail(grid, "Models", [
+					song.text_model ? `prompt: ${song.text_model}` : "",
+					song.music_model ? `music: ${song.music_model}` : "",
+				].filter(Boolean).join("\n") || "Older song; model names not stored.");
+				addDetail(grid, "Creative seed", [
+					song.creative_seed,
+					song.creative_axis,
+					typeof song.creative_bpm === "number" ? `${song.creative_bpm} BPM seed` : "",
+				].filter(Boolean).join("\n") || "Not stored");
+				addDetail(grid, "Lyrics source", song.lyrics_source || "Older song; lyrics were not stored.");
+				container.append(grid);
+				addBlock(container, "AI-expanded music prompt", song.prompt || "Not stored");
+				addBlock(container, "Lyrics sent to MiniMax", song.lyrics || "Not stored for this older generation. Earlier radio songs used MiniMax lyrics_optimizer, which can derive lyrics internally from the prompt but does not return them to us.");
+				if (song.generation_input) {
+					addBlock(container, "Exact MiniMax input", JSON.stringify(song.generation_input, null, 2));
+				}
+				if (song.cover_art_prompt) addBlock(container, "Cover prompt", song.cover_art_prompt);
+			}
+
+			function addDetail(parent, label, value) {
+				const field = document.createElement("div");
+				field.className = "detail-field";
+				const labelEl = document.createElement("div");
+				labelEl.className = "detail-label";
+				labelEl.textContent = label;
+				const valueEl = document.createElement("div");
+				valueEl.className = "detail-value";
+				valueEl.textContent = value;
+				field.append(labelEl, valueEl);
+				parent.append(field);
+			}
+
+			function addBlock(parent, label, value) {
+				const details = document.createElement("details");
+				const summary = document.createElement("summary");
+				summary.textContent = label;
+				const pre = document.createElement("pre");
+				pre.textContent = value;
+				details.append(summary, pre);
+				parent.append(details);
+			}
+
+			function tempoText(song) {
+				if (typeof song.bpm_min === "number" && typeof song.bpm_max === "number") return `${song.bpm_min}-${song.bpm_max} BPM`;
+				if (typeof song.creative_bpm === "number") return `${song.creative_bpm} BPM`;
+				return "";
 			}
 
 			function radioFail(message) {
@@ -884,6 +1005,7 @@
 				stationPlayer.removeAttribute("src");
 				delete stationPlayer.dataset.songId;
 				nowPlayingEl.textContent = "Loading station...";
+				nowPlayingDetailsEl.innerHTML = "";
 			}
 		</script>
 	</body>

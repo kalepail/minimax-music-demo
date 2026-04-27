@@ -104,10 +104,10 @@ Bindings used (declared in `wrangler.jsonc`):
 
 - Cron runs every 5 minutes and calls `RadioStation.fill(10)` when `RADIO_AUTOFILL=true`.
 - The station DO remembers listener requests and in-flight song IDs, then enqueues one Queue message per needed song.
-- The Queue consumer uses `@cf/meta/llama-3.1-8b-instruct-fast` to expand a listener request into a rich MiniMax prompt, then calls `minimax/music-2.6`.
+- The Queue consumer uses `@cf/meta/llama-3.1-8b-instruct-fast` to expand a listener request into a rich MiniMax prompt and original lyrics, then calls `minimax/music-2.6` with those lyrics instead of relying on opaque MiniMax lyric generation.
 - Finished station songs are stored under `radio/audio/` in R2 and metadata under `radio/metadata/`.
 - Generated cover art is stored under `radio/covers/` in R2.
-- Finished song metadata is indexed in D1 tables `songs`, `song_tags`, and `stations`.
+- Finished song metadata, including lyrics, prompt plan, model names, creative seeds, and exact generation input, is indexed in D1 tables `songs`, `song_tags`, and `stations`.
 - The playlist is stored in the station DO for quick live UI reads; D1 is used for library history, pagination, sorting, and genre/tag filtering.
 
 ## Library queries
