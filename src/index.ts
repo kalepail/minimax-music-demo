@@ -8,13 +8,11 @@ import {
 	audioResponseHeaders,
 	clientRateLimitKey,
 	extractAudioUrl,
-	isDemoTokenAuthorized,
 	isExpiredRateLimit,
 	json,
 	isStaleRunningJob,
 	parseInput,
 	publicStatus,
-	readDemoToken,
 	shouldCleanUp,
 	snippet,
 	type AttemptLog,
@@ -22,10 +20,6 @@ import {
 	type MusicInput,
 	type RateLimitRecord,
 } from "./lib";
-
-type EnvWithOptionalDemoToken = Env & {
-	DEMO_TOKEN?: string;
-};
 
 export class MusicJob extends DurableObject<Env> {
 	async start(input: MusicInput): Promise<void> {
@@ -208,11 +202,6 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 async function handleGenerate(request: Request, env: Env): Promise<Response> {
-	const demoToken = readDemoToken(env as EnvWithOptionalDemoToken);
-	if (demoToken && !(await isDemoTokenAuthorized(request, demoToken))) {
-		return json({ error: "demo token required" }, 401);
-	}
-
 	let body: unknown;
 	try {
 		body = await request.json();
@@ -227,20 +216,18 @@ async function handleGenerate(request: Request, env: Env): Promise<Response> {
 		return json({ error: "AI_GATEWAY_ID not configured" }, 500);
 	}
 
-	if (!demoToken) {
-		const rateStub = env.MUSIC_JOB.get(env.MUSIC_JOB.idFromName(clientRateLimitKey(request)));
-		const rateLimit = await rateStub.checkRateLimit();
-		if (!rateLimit.allowed) {
-			const retryAfterSeconds = Math.ceil(rateLimit.retry_after_ms / 1000);
-			return json(
-				{
-					error: "rate limit exceeded",
-					retry_after_seconds: retryAfterSeconds,
-				},
-				429,
-				{ "Retry-After": String(retryAfterSeconds) },
-			);
-		}
+	const rateStub = env.MUSIC_JOB.get(env.MUSIC_JOB.idFromName(clientRateLimitKey(request)));
+	const rateLimit = await rateStub.checkRateLimit();
+	if (!rateLimit.allowed) {
+		const retryAfterSeconds = Math.ceil(rateLimit.retry_after_ms / 1000);
+		return json(
+			{
+				error: "rate limit exceeded",
+				retry_after_seconds: retryAfterSeconds,
+			},
+			429,
+			{ "Retry-After": String(retryAfterSeconds) },
+		);
 	}
 
 	const jobId = crypto.randomUUID();

@@ -51,7 +51,6 @@
 				color: var(--muted);
 				margin-bottom: 6px;
 			}
-			input[type="password"],
 			textarea,
 			select {
 				width: 100%;
@@ -162,9 +161,6 @@
 					</div>
 				</div>
 
-				<label for="token" style="margin-top: 14px">Demo token (if required)</label>
-				<input id="token" type="password" autocomplete="off" />
-
 				<button type="submit" id="go">Generate song</button>
 				<div id="status" class="status"></div>
 			</form>
@@ -179,7 +175,6 @@
 			const lyricsEl = document.getElementById("lyrics");
 			const formatEl = document.getElementById("format");
 			const instrumentalEl = document.getElementById("instrumental");
-			const tokenEl = document.getElementById("token");
 			const button = document.getElementById("go");
 			const statusEl = document.getElementById("status");
 			const player = document.getElementById("player");
@@ -224,7 +219,7 @@
 				try {
 					const res = await fetch("/api/generate", {
 						method: "POST",
-						headers: requestHeaders(),
+						headers: { "Content-Type": "application/json" },
 						body: JSON.stringify(body),
 					});
 					const data = await res.json();
@@ -288,12 +283,6 @@
 
 			function writeJobToHash(id) {
 				window.location.hash = `job=${id}`;
-			}
-
-			function requestHeaders() {
-				const headers = { "Content-Type": "application/json" };
-				if (tokenEl.value.trim()) headers["X-Demo-Token"] = tokenEl.value.trim();
-				return headers;
 			}
 		</script>
 	</body>

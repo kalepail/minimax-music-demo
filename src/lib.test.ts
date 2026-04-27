@@ -9,11 +9,9 @@ import {
 	audioResponseHeaders,
 	clientRateLimitKey,
 	extractAudioUrl,
-	isDemoTokenAuthorized,
 	isStaleRunningJob,
 	parseInput,
 	publicStatus,
-	readDemoToken,
 	shouldCleanUp,
 	type JobRecord,
 } from "./lib";
@@ -160,26 +158,6 @@ describe("rate limiting", () => {
 		expect(clientRateLimitKey(new Request("https://example.com", { headers: { "X-Forwarded-For": "198.51.100.1, 10.0.0.1" } }))).toBe(
 			"rate:198.51.100.1",
 		);
-	});
-});
-
-describe("demo token helpers", () => {
-	it("ignores missing and blank configured tokens", () => {
-		expect(readDemoToken({})).toBeUndefined();
-		expect(readDemoToken({ DEMO_TOKEN: "   " })).toBeUndefined();
-	});
-
-	it("accepts x-demo-token and bearer tokens", async () => {
-		await expect(
-			isDemoTokenAuthorized(new Request("https://example.com", { headers: { "X-Demo-Token": "secret" } }), "secret"),
-		).resolves.toBe(true);
-		await expect(
-			isDemoTokenAuthorized(new Request("https://example.com", { headers: { Authorization: "Bearer secret" } }), "secret"),
-		).resolves.toBe(true);
-		await expect(
-			isDemoTokenAuthorized(new Request("https://example.com", { headers: { "X-Demo-Token": "wrong" } }), "secret"),
-		).resolves.toBe(false);
-		await expect(isDemoTokenAuthorized(new Request("https://example.com"), "secret")).resolves.toBe(false);
 	});
 });
 

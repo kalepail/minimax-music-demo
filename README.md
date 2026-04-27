@@ -55,15 +55,7 @@ pnpm deploy       # deploy to your Cloudflare account
 
 ## Public demo protection
 
-`POST /api/generate` is rate limited by client IP to 3 accepted jobs per hour when no token is configured.
-
-For a shared public demo, add a `DEMO_TOKEN` secret and give that token to demo users:
-
-```bash
-npx wrangler secret put DEMO_TOKEN
-```
-
-For local development, put `DEMO_TOKEN=your-token` in `.dev.vars`. When `DEMO_TOKEN` is set, the API requires the token in `X-Demo-Token` or `Authorization: Bearer ...`; the frontend includes an optional token field for this.
+`POST /api/generate` is rate limited by client IP to 3 accepted jobs per hour.
 
 Bindings used (declared in `wrangler.jsonc`):
 
