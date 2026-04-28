@@ -76,6 +76,9 @@ const D1_IN_CLAUSE_CHUNK_SIZE = 75;
 const APP_EVENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const RADIO_WORKFLOW_SUCCESS_RETENTION = "7 days";
 const RADIO_WORKFLOW_ERROR_RETENTION = "14 days";
+const RADIO_PROMPT_TIMEOUT_MS = 30_000;
+const RADIO_LYRICS_TIMEOUT_MS = 60_000;
+const RADIO_REVIEW_TIMEOUT_MS = 30_000;
 const SHORT_TEXT_STEP_CONFIG = {
 	retries: { limit: 2, delay: "30 seconds", backoff: "linear" },
 	timeout: "5 minutes",
@@ -246,6 +249,12 @@ export class MusicJob extends DurableObject<Env> {
 				model: RADIO_MUSIC_MODEL,
 				duration_ms: attemptLog.duration_ms,
 				message: attemptLog.error,
+				details: {
+					attempt: attemptLog.attempt,
+					format: job.input.format,
+					is_instrumental: job.input.is_instrumental,
+					has_lyrics: Boolean(job.input.lyrics),
+				},
 			});
 			await this.finalize({
 				...job,
@@ -387,6 +396,13 @@ export class MusicJob extends DurableObject<Env> {
 			model: RADIO_MUSIC_MODEL,
 			duration_ms: attemptLog.duration_ms,
 			message: attemptLog.error ?? "Model returned no audio URL",
+			details: {
+				format: job.input.format,
+				is_instrumental: job.input.is_instrumental,
+				has_lyrics: Boolean(job.input.lyrics),
+				lyrics_optimizer: !job.input.is_instrumental && !job.input.lyrics,
+				response_snippet: snippet(result),
+			},
 		});
 	}
 
@@ -398,7 +414,7 @@ export class MusicJob extends DurableObject<Env> {
 
 	private async persistAudio(job: JobRecord, audioUrl: string): Promise<{ contentType: string; key: string }> {
 		const upstream = await fetch(audioUrl);
-		if (!upstream.ok || !upstream.body) {
+		if (!upstream.ok || upstream.status !== 200 || !upstream.body) {
 			throw new Error(`upstream audio fetch failed before persistence: ${upstream.status}`);
 		}
 
@@ -905,6 +921,9 @@ async function routeRequest(request: Request, env: Env, url = new URL(request.ur
 	if (url.pathname === "/api/library" && request.method === "GET") {
 		return handleLibrary(url, env);
 	}
+	if (url.pathname === "/api/library/tags" && request.method === "GET") {
+		return handleLibraryTags(url, env);
+	}
 	const librarySongMatch = url.pathname.match(/^\/api\/library\/([A-Za-z0-9_-]+)$/);
 	if (librarySongMatch && request.method === "GET") {
 		return handleLibrarySong(librarySongMatch[1], env);
@@ -917,8 +936,19 @@ async function routeRequest(request: Request, env: Env, url = new URL(request.ur
 	if (radioCoverMatch && (request.method === "GET" || request.method === "HEAD")) {
 		return handleRadioCover(request, radioCoverMatch[1], env);
 	}
+	const generatedSongPageMatch = url.pathname.match(/^\/gen\/([A-Za-z0-9_-]+)$/);
+	if (generatedSongPageMatch && (request.method === "GET" || request.method === "HEAD")) {
+		return serveIndexAsset(request, env);
+	}
 
 	return env.ASSETS.fetch(request);
+}
+
+function serveIndexAsset(request: Request, env: Env): Promise<Response> {
+	const indexUrl = new URL(request.url);
+	indexUrl.pathname = "/";
+	indexUrl.search = "";
+	return env.ASSETS.fetch(new Request(indexUrl, request));
 }
 
 function errorMessage(err: unknown): string {
@@ -927,9 +957,73 @@ function errorMessage(err: unknown): string {
 
 function errorDetails(err: unknown): Record<string, unknown> {
 	if (!(err instanceof Error)) return { error: String(err) };
-	return {
+	const details: Record<string, unknown> = {
 		name: err.name,
 		stack: err.stack,
+	};
+	const cause = (err as Error & { cause?: unknown }).cause;
+	if (cause !== undefined) details.cause = cause instanceof Error ? { name: cause.name, message: cause.message } : String(cause);
+	return details;
+}
+
+function errorKind(err: unknown): string {
+	const name = err instanceof Error ? err.name : "";
+	const message = errorMessage(err);
+	if (name === "TimeoutError" || /\btimeout\b|\baborted due to timeout\b/i.test(message)) return "timeout";
+	if (name === "AbortError" || /\babort/i.test(message)) return "abort";
+	if (/\brate.?limit|429/i.test(message)) return "rate_limit";
+	if (/\bquota|limit exceeded/i.test(message)) return "quota";
+	if (/\bjson\b|parse/i.test(message)) return "parse";
+	return "error";
+}
+
+function radioMessageDetails(message: RadioGenerateMessage): Record<string, unknown> {
+	return {
+		station_id: message.station_id,
+		genre: message.genre,
+		has_request: Boolean(message.request_text),
+		request_chars: message.request_text?.length ?? 0,
+		creative_axis: message.creative_axis,
+		creative_bpm: message.creative_bpm,
+	};
+}
+
+function draftDetails(title: string | undefined, prompt: string | undefined, lyrics: string | undefined): Record<string, unknown> {
+	return {
+		title,
+		prompt_chars: prompt?.length ?? 0,
+		has_lyrics: Boolean(lyrics),
+		lyrics_chars: lyrics?.length ?? 0,
+	};
+}
+
+function safeUrlHost(value: string): string | undefined {
+	try {
+		return new URL(value).host;
+	} catch {
+		return undefined;
+	}
+}
+
+function lyricQualityDetails(lyrics: string): Record<string, unknown> {
+	const sections = lyrics.match(/^\s*\[[^\]]+\]\s*$/gm) ?? [];
+	const lyricLines = lyrics.split("\n").map((line) => line.trim()).filter((line) => line && !/^\[[^\]]+\]$/.test(line));
+	const uniqueLines = new Set(lyricLines.map((line) => line.toLowerCase()));
+	const reasons: string[] = [];
+	if (lyrics.length < 650) reasons.push("too_short");
+	if (lyrics.length > LYRICS_MAX_CHARS) reasons.push("too_long");
+	if (!/\[Verse(?:\s+\d+)?\]/i.test(lyrics)) reasons.push("missing_verse");
+	if (!/\[Chorus\]/i.test(lyrics)) reasons.push("missing_chorus");
+	if (/\b[a-z]+-[a-z]+-[a-f0-9]{6,}\b/i.test(lyrics) || /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}/i.test(lyrics)) reasons.push("id_leak");
+	if (/^\s*(Verse|Chorus|Bridge|Outro)\s*:/im.test(lyrics)) reasons.push("colon_section_labels");
+	if (lyricLines.length < 16) reasons.push("too_few_lyric_lines");
+	if (lyricLines.length >= 16 && uniqueLines.size < Math.ceil(lyricLines.length * 0.55)) reasons.push("too_repetitive");
+	return {
+		lyrics_chars: lyrics.length,
+		section_count: sections.length,
+		lyric_line_count: lyricLines.length,
+		unique_lyric_line_count: uniqueLines.size,
+		failure_reasons: reasons,
 	};
 }
 
@@ -1110,6 +1204,18 @@ async function handleAudio(request: Request, jobId: string, env: Env): Promise<R
 	}
 	if (!upstream.ok || !upstream.body) {
 		const text = await upstream.text().catch(() => "");
+		await recordAppEvent(env, {
+			level: "error",
+			event: "audio_proxy_failed",
+			operation: "GET /api/audio/:jobId",
+			status_code: upstream.status,
+			message: `upstream audio fetch failed: ${upstream.status}`,
+			details: {
+				job_id: jobId,
+				audio_url_host: safeUrlHost(record.audio_url),
+				response_snippet: text.slice(0, 500),
+			},
+		});
 		return json(
 			{ error: `upstream audio fetch failed: ${upstream.status}`, body: text.slice(0, 500) },
 			502,
@@ -1207,6 +1313,28 @@ async function handleLibrary(url: URL, env: Env): Promise<Response> {
 	if ("error" in query) return json(query, 400);
 	const result = await listSongs(env.DB, query);
 	return json(result);
+}
+
+async function handleLibraryTags(url: URL, env: Env): Promise<Response> {
+	const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") ?? "60", 10) || 60, 1), 200);
+	const genreParam = url.searchParams.get("genre")?.trim();
+	const genre = genreParam ? canonicalGenreKey(genreParam) ?? genreParam : null;
+	const sql = genre
+		? `SELECT st.tag AS tag, COUNT(*) AS count
+		   FROM song_tags st
+		   JOIN songs s ON s.id = st.song_id
+		   WHERE s.genre_key = ?
+		   GROUP BY st.tag
+		   ORDER BY count DESC, tag ASC
+		   LIMIT ?`
+		: `SELECT tag, COUNT(*) AS count
+		   FROM song_tags
+		   GROUP BY tag
+		   ORDER BY count DESC, tag ASC
+		   LIMIT ?`;
+	const stmt = genre ? env.DB.prepare(sql).bind(genre, limit) : env.DB.prepare(sql).bind(limit);
+	const rows = await stmt.all<{ tag: string; count: number }>();
+	return json({ tags: rows.results ?? [] });
 }
 
 async function handleLibrarySong(songId: string, env: Env): Promise<Response> {
@@ -1670,6 +1798,7 @@ type RadioCoverArtFields = Pick<
 export class RadioSongWorkflow extends WorkflowEntrypoint<Env, RadioGenerateMessage> {
 	async run(event: Readonly<WorkflowEvent<RadioGenerateMessage>>, step: WorkflowStep): Promise<unknown> {
 		const message = normalizeRadioGenerateMessage(event.payload);
+		const workflowStartedAt = Date.now();
 		try {
 			const existingJson = await step.do(
 				`restore existing song ${message.song_id}`,
@@ -1683,6 +1812,16 @@ export class RadioSongWorkflow extends WorkflowEntrypoint<Env, RadioGenerateMess
 					PERSIST_STEP_CONFIG,
 					async () => completeRadioSong(this.env, existing),
 				);
+				await recordAppEvent(this.env, {
+					level: "info",
+					event: "workflow_reused_existing_song",
+					operation: "radio_song_workflow",
+					song_id: message.song_id,
+					request_id: message.request_id,
+					workflow_instance_id: radioSongWorkflowInstanceId(message.song_id),
+					duration_ms: Date.now() - workflowStartedAt,
+					details: radioMessageDetails(message),
+				});
 				return { song_id: message.song_id, status: "complete", reused: true };
 			}
 
@@ -1712,16 +1851,17 @@ export class RadioSongWorkflow extends WorkflowEntrypoint<Env, RadioGenerateMess
 					error: err instanceof Error ? err.message : String(err),
 					song_id: message.song_id,
 				});
-				await recordAppEvent(this.env, {
-					level: "error",
-					event: "cover_generation_failed",
-					operation: "radio_cover",
-					song_id: message.song_id,
-					request_id: message.request_id,
-					workflow_instance_id: radioSongWorkflowInstanceId(message.song_id),
-					message: errorMessage(err),
-					details: errorDetails(err),
-				});
+					await recordAppEvent(this.env, {
+						level: "error",
+						event: "cover_generation_failed",
+						operation: "radio_cover",
+						song_id: message.song_id,
+						request_id: message.request_id,
+						workflow_instance_id: radioSongWorkflowInstanceId(message.song_id),
+						duration_ms: Date.now() - startedAt,
+						message: errorMessage(err),
+						details: errorDetails(err),
+					});
 				return {} satisfies RadioCoverArtFields;
 			});
 			const completed = await step.do(
@@ -1730,18 +1870,19 @@ export class RadioSongWorkflow extends WorkflowEntrypoint<Env, RadioGenerateMess
 				async () => completeRadioSong(this.env, { ...song, ...cover }),
 			);
 			return { song_id: message.song_id, status: "complete", completed_at: completed.completed_at };
-		} catch (err) {
-			const error = err instanceof Error ? err.message : String(err);
-			await recordAppEvent(this.env, {
-				level: "error",
-				event: "workflow_failed",
-				operation: "radio_song_workflow",
-				song_id: message.song_id,
-				request_id: message.request_id,
-				workflow_instance_id: radioSongWorkflowInstanceId(message.song_id),
-				message: error,
-				details: errorDetails(err),
-			});
+			} catch (err) {
+				const error = err instanceof Error ? err.message : String(err);
+				await recordAppEvent(this.env, {
+					level: "error",
+					event: "workflow_failed",
+					operation: "radio_song_workflow",
+					song_id: message.song_id,
+					request_id: message.request_id,
+					workflow_instance_id: radioSongWorkflowInstanceId(message.song_id),
+					duration_ms: Date.now() - workflowStartedAt,
+					message: error,
+					details: errorDetails(err),
+				});
 			await step.do(
 				`mark radio song failed ${message.song_id}`,
 				PERSIST_STEP_CONFIG,
@@ -1775,6 +1916,14 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 	let title: string | undefined;
 	let lyrics: string | undefined;
 	for (let attempt = 0; attempt < 2; attempt++) {
+		const draftAttemptStartedAt = Date.now();
+		const attemptNumber = attempt + 1;
+		const workflowInstanceId = radioSongWorkflowInstanceId(message.song_id);
+		const baseDetails = {
+			...radioMessageDetails(message),
+			attempt_number: attemptNumber,
+			workflow_instance_id: workflowInstanceId,
+		};
 		plan = await createRadioPrompt(message, env, draftReservations, repairGuidance).catch(async (err) => {
 			console.warn("Radio prompt expansion failed; using fallback prompt", {
 				error: err instanceof Error ? err.message : String(err),
@@ -1787,14 +1936,23 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 				model: RADIO_TEXT_MODEL,
 				song_id: message.song_id,
 				request_id: message.request_id,
+				workflow_instance_id: workflowInstanceId,
+				duration_ms: Date.now() - draftAttemptStartedAt,
 				message: errorMessage(err),
-				details: errorDetails(err),
+				details: {
+					...baseDetails,
+					reason_type: errorKind(err),
+					timeout_ms: RADIO_PROMPT_TIMEOUT_MS,
+					...errorDetails(err),
+				},
 			});
 			return fallbackRadioPrompt(message);
 		});
-		title = await ensureCatalogDistinctTitle(env.DB, plan.title, message);
+		if (!plan) throw new Error("Radio prompt planning did not produce a song plan");
+		const activePlan: RadioPromptPlan = plan;
+		title = await ensureCatalogDistinctTitle(env.DB, activePlan.title, message);
 		if (isFallbackTitle(title)) {
-			const repairedTitle = await repairRadioTitle(plan, message, env, draftReservations).catch(async (err) => {
+			const repairedTitle = await repairRadioTitle(activePlan, message, env, draftReservations).catch(async (err) => {
 				console.warn("Radio title repair failed; using fallback title", {
 					error: err instanceof Error ? err.message : String(err),
 					song_id: message.song_id,
@@ -1806,14 +1964,23 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 					model: RADIO_TEXT_MODEL,
 					song_id: message.song_id,
 					request_id: message.request_id,
+					workflow_instance_id: workflowInstanceId,
+					duration_ms: Date.now() - draftAttemptStartedAt,
 					message: errorMessage(err),
-					details: errorDetails(err),
+					details: {
+							...baseDetails,
+							...draftDetails(title, activePlan.prompt, lyrics),
+						reason_type: errorKind(err),
+						timeout_ms: RADIO_REVIEW_TIMEOUT_MS,
+						...errorDetails(err),
+					},
 				});
 				return title ?? fallbackTitle(message);
 			});
 			title = await ensureCatalogDistinctTitle(env.DB, repairedTitle, message);
 		}
-		lyrics = await createRadioLyrics(plan, title, message, env, draftReservations).catch(async (err) => {
+		const lyricStartedAt = Date.now();
+			lyrics = await createRadioLyrics(activePlan, title, message, env, draftReservations).catch(async (err) => {
 			console.warn("Radio lyrics generation failed; falling back to MiniMax lyrics optimizer", {
 				error: err instanceof Error ? err.message : String(err),
 				song_id: message.song_id,
@@ -1825,12 +1992,20 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 				model: RADIO_LYRICS_MODEL,
 				song_id: message.song_id,
 				request_id: message.request_id,
+				workflow_instance_id: workflowInstanceId,
+				duration_ms: Date.now() - lyricStartedAt,
 				message: errorMessage(err),
-				details: errorDetails(err),
+				details: {
+						...baseDetails,
+						...draftDetails(title, activePlan.prompt, undefined),
+					reason_type: errorKind(err),
+					timeout_ms: RADIO_LYRICS_TIMEOUT_MS,
+					...errorDetails(err),
+				},
 			});
 			return undefined;
 		});
-		const overusedNounConflict = await reviewOverusedNounConflict({ title, prompt: plan.prompt, lyrics }, message, env).catch(async (err) => {
+			const overusedNounConflict = await reviewOverusedNounConflict({ title, prompt: activePlan.prompt, lyrics }, message, env).catch(async (err) => {
 			console.warn("Radio overused noun review failed; continuing with similarity review", {
 				error: err instanceof Error ? err.message : String(err),
 				song_id: message.song_id,
@@ -1842,17 +2017,41 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 				model: RADIO_TEXT_MODEL,
 				song_id: message.song_id,
 				request_id: message.request_id,
+				workflow_instance_id: workflowInstanceId,
+				duration_ms: Date.now() - draftAttemptStartedAt,
 				message: errorMessage(err),
-				details: errorDetails(err),
+				details: {
+						...baseDetails,
+						...draftDetails(title, activePlan.prompt, lyrics),
+					reason_type: errorKind(err),
+					timeout_ms: RADIO_REVIEW_TIMEOUT_MS,
+					...errorDetails(err),
+				},
 			});
 			return undefined;
 		});
 		if (overusedNounConflict && attempt === 0) {
+			await recordAppEvent(env, {
+				level: "warn",
+				event: "radio_draft_rejected",
+				operation: "radio_draft_review",
+				model: RADIO_TEXT_MODEL,
+				song_id: message.song_id,
+				request_id: message.request_id,
+				workflow_instance_id: workflowInstanceId,
+				duration_ms: Date.now() - draftAttemptStartedAt,
+				message: overusedNounConflict,
+				details: {
+						...baseDetails,
+						...draftDetails(title, activePlan.prompt, lyrics),
+					rejection_source: "overused_noun_review",
+				},
+			});
 			repairGuidance = overusedNounConflict;
 			draftReservations = await station.draftReservations();
 			continue;
 		}
-		const similarity = await reviewDraftSimilarity({ title, prompt: plan.prompt, lyrics }, message, env, draftReservations).catch(async (err) => {
+			const similarity = await reviewDraftSimilarity({ title, prompt: activePlan.prompt, lyrics }, message, env, draftReservations).catch(async (err) => {
 			console.warn("Radio similarity review failed; using reservation checks only", {
 				error: err instanceof Error ? err.message : String(err),
 				song_id: message.song_id,
@@ -1864,19 +2063,62 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 				model: RADIO_TEXT_MODEL,
 				song_id: message.song_id,
 				request_id: message.request_id,
+				workflow_instance_id: workflowInstanceId,
+				duration_ms: Date.now() - draftAttemptStartedAt,
 				message: errorMessage(err),
-				details: errorDetails(err),
+				details: {
+						...baseDetails,
+						...draftDetails(title, activePlan.prompt, lyrics),
+					reason_type: errorKind(err),
+					timeout_ms: RADIO_REVIEW_TIMEOUT_MS,
+					...errorDetails(err),
+				},
 			});
 			return { too_similar: false } satisfies SimilarityReview;
 		});
 		if (similarity.too_similar && attempt === 0) {
 			repairGuidance = similarity.repair_guidance || similarity.reason || "Make the title, lyrical premise, arrangement, and production language less similar to recent or in-flight songs.";
+			await recordAppEvent(env, {
+				level: "warn",
+				event: "radio_draft_rejected",
+				operation: "radio_draft_review",
+				model: RADIO_TEXT_MODEL,
+				song_id: message.song_id,
+				request_id: message.request_id,
+				workflow_instance_id: workflowInstanceId,
+				duration_ms: Date.now() - draftAttemptStartedAt,
+					message: repairGuidance,
+					details: {
+						...baseDetails,
+						...draftDetails(title, activePlan.prompt, lyrics),
+					rejection_source: "similarity_review",
+					nearest_title: similarity.nearest_title,
+					reason: similarity.reason,
+				},
+			});
 			draftReservations = await station.draftReservations();
 			continue;
 		}
-		const reservation = radioDraftReservation(message.song_id, title, plan.prompt, lyrics, message.request_text);
+			const reservation = radioDraftReservation(message.song_id, title, activePlan.prompt, lyrics, message.request_text);
 		const reserved = await station.reserveDraft(reservation);
 		if (reserved.accepted) break;
+		await recordAppEvent(env, {
+			level: "warn",
+			event: "radio_draft_rejected",
+			operation: "radio_draft_reservation",
+			song_id: message.song_id,
+			request_id: message.request_id,
+			workflow_instance_id: workflowInstanceId,
+			duration_ms: Date.now() - draftAttemptStartedAt,
+			message: reserved.reason || "Draft reservation rejected",
+				details: {
+					...baseDetails,
+					...draftDetails(title, activePlan.prompt, lyrics),
+				rejection_source: "draft_reservation",
+				conflict_song_id: reserved.conflict_song_id,
+				reservation_count: reserved.reservations.length,
+			},
+		});
 		if (attempt === 0) {
 			repairGuidance = reserved.reason || "Move away from in-flight drafts created by this fill.";
 			draftReservations = reserved.reservations;
@@ -1950,8 +2192,29 @@ async function generateAndPersistRadioAudio(message: RadioGenerateMessage, env: 
 		throw new Error(messageText);
 	}
 
-	const upstream = await fetch(audio);
-	if (!upstream.ok || !upstream.body) {
+	let upstream: Response;
+	try {
+		upstream = await fetch(audio);
+	} catch (err) {
+		await recordAppEvent(env, {
+			level: "error",
+			event: "audio_fetch_error",
+			operation: "radio_music",
+			model: RADIO_MUSIC_MODEL,
+			song_id: message.song_id,
+			request_id: message.request_id,
+			workflow_instance_id: radioSongWorkflowInstanceId(message.song_id),
+			duration_ms: Date.now() - modelStartedAt,
+			message: errorMessage(err),
+			details: {
+				format: message.format,
+				audio_url_host: safeUrlHost(audio),
+				...errorDetails(err),
+			},
+		});
+		throw err;
+	}
+	if (!upstream.ok || upstream.status !== 200 || !upstream.body) {
 		const messageText = `upstream audio fetch failed before persistence: ${upstream.status}`;
 		await recordAppEvent(env, {
 			level: "error",
@@ -1964,21 +2227,48 @@ async function generateAndPersistRadioAudio(message: RadioGenerateMessage, env: 
 			status_code: upstream.status,
 			duration_ms: Date.now() - modelStartedAt,
 			message: messageText,
+			details: {
+				format: message.format,
+				audio_url_host: safeUrlHost(audio),
+				content_length: upstream.headers.get("content-length"),
+				content_range: upstream.headers.get("content-range"),
+			},
 		});
 		throw new Error(messageText);
 	}
 
 	const contentType = upstream.headers.get("content-type") ?? "audio/mpeg";
-	await env.AUDIO_BUCKET.put(audioObjectKey, upstream.body, {
-		httpMetadata: {
-			cacheControl: "public, max-age=3600",
-			contentType,
-		},
-		customMetadata: {
-			station: message.station_id,
-			title: draft.title,
-		},
-	});
+	try {
+		await env.AUDIO_BUCKET.put(audioObjectKey, upstream.body, {
+			httpMetadata: {
+				cacheControl: "public, max-age=3600",
+				contentType,
+			},
+			customMetadata: {
+				station: message.station_id,
+				title: draft.title,
+			},
+		});
+	} catch (err) {
+		await recordAppEvent(env, {
+			level: "error",
+			event: "audio_persistence_error",
+			operation: "radio_music",
+			model: RADIO_MUSIC_MODEL,
+			song_id: message.song_id,
+			request_id: message.request_id,
+			workflow_instance_id: radioSongWorkflowInstanceId(message.song_id),
+			duration_ms: Date.now() - modelStartedAt,
+			message: errorMessage(err),
+			details: {
+				audio_object_key: audioObjectKey,
+				content_type: contentType,
+				format: message.format,
+				...errorDetails(err),
+			},
+		});
+		throw err;
+	}
 
 	await recordAppEvent(env, {
 		level: "info",
@@ -2064,14 +2354,73 @@ async function generateRadioCoverArtFields(env: Env, song: RadioSong): Promise<R
 async function completeRadioSong(env: Env, song: RadioSong): Promise<{ completed_at: number }> {
 	// Persist the R2 manifest before D1 so a retried workflow can recover
 	// generated audio/metadata and re-apply the catalog write idempotently.
-	await env.AUDIO_BUCKET.put(song.metadata_object_key, JSON.stringify(song, null, 2), {
-		httpMetadata: {
-			cacheControl: "public, max-age=3600",
-			contentType: "application/json",
-		},
-	});
-	await persistSongCatalog(env.DB, song);
-	await radioStation(env, song.station_id).complete(song);
+	const startedAt = Date.now();
+	try {
+		await env.AUDIO_BUCKET.put(song.metadata_object_key, JSON.stringify(song, null, 2), {
+			httpMetadata: {
+				cacheControl: "public, max-age=3600",
+				contentType: "application/json",
+			},
+		});
+	} catch (err) {
+		await recordAppEvent(env, {
+			level: "error",
+			event: "radio_metadata_persist_failed",
+			operation: "radio_persist",
+			song_id: song.id,
+			request_id: song.request_id,
+			workflow_instance_id: radioSongWorkflowInstanceId(song.id),
+			duration_ms: Date.now() - startedAt,
+			message: errorMessage(err),
+			details: {
+				title: song.title,
+				metadata_object_key: song.metadata_object_key,
+				...errorDetails(err),
+			},
+		});
+		throw err;
+	}
+	try {
+		await persistSongCatalog(env.DB, song);
+	} catch (err) {
+		await recordAppEvent(env, {
+			level: "error",
+			event: "radio_catalog_persist_failed",
+			operation: "radio_persist",
+			song_id: song.id,
+			request_id: song.request_id,
+			workflow_instance_id: radioSongWorkflowInstanceId(song.id),
+			duration_ms: Date.now() - startedAt,
+			message: errorMessage(err),
+			details: {
+				title: song.title,
+				lyrics_source: song.lyrics_source,
+				has_cover: Boolean(song.cover_art_object_key),
+				...errorDetails(err),
+			},
+		});
+		throw err;
+	}
+	try {
+		await radioStation(env, song.station_id).complete(song);
+	} catch (err) {
+		await recordAppEvent(env, {
+			level: "error",
+			event: "radio_station_complete_failed",
+			operation: "radio_persist",
+			song_id: song.id,
+			request_id: song.request_id,
+			workflow_instance_id: radioSongWorkflowInstanceId(song.id),
+			duration_ms: Date.now() - startedAt,
+			message: errorMessage(err),
+			details: {
+				title: song.title,
+				station_id: song.station_id,
+				...errorDetails(err),
+			},
+		});
+		throw err;
+	}
 	return { completed_at: song.completed_at };
 }
 
@@ -2450,6 +2799,7 @@ async function createRadioPrompt(
 		? `A listener requested: "${message.request_text}". Interpret it creatively without copying copyrighted lyrics or imitating a living artist exactly.`
 		: "No listener request is active. Invent a vivid left-field song concept fit for a strange internet radio station.";
 	const fallback = fallbackRadioPrompt(message);
+	const promptStartedAt = Date.now();
 
 	const response = await env.AI.run(
 		RADIO_TEXT_MODEL,
@@ -2484,17 +2834,66 @@ Create one surprising station-ready song concept from scratch. Let the title, im
 		{
 			gateway: {
 				id: env.AI_GATEWAY_ID,
-				requestTimeoutMs: 30_000,
+				requestTimeoutMs: RADIO_PROMPT_TIMEOUT_MS,
 				retries: { maxAttempts: 1 },
 			},
-			signal: AbortSignal.timeout(30_000),
+			signal: AbortSignal.timeout(RADIO_PROMPT_TIMEOUT_MS),
 		},
 	);
 
 	const parsed = parsePromptPlanResponse(response);
-	if (!parsed.prompt && !parsed.title) return fallback;
+	if (!parsed.prompt && !parsed.title) {
+		await recordAppEvent(env, {
+			level: "warn",
+			event: "radio_prompt_invalid_response",
+			operation: "radio_prompt",
+			model: RADIO_TEXT_MODEL,
+			song_id: message.song_id,
+			request_id: message.request_id,
+			workflow_instance_id: radioSongWorkflowInstanceId(message.song_id),
+			duration_ms: Date.now() - promptStartedAt,
+			message: "Prompt model response did not include a usable title or prompt; using fallback prompt",
+			details: {
+				...radioMessageDetails(message),
+				timeout_ms: RADIO_PROMPT_TIMEOUT_MS,
+				response_snippet: snippet(response),
+			},
+		});
+		return fallback;
+	}
 	const title = distinctRadioTitle(parsed.title || fallback.title, recentTitles, message);
 	const prompt = makePromptUnique(parsed.prompt || fallback.prompt, message, recent.map((item) => item.prompt));
+	const missingFields = [
+		parsed.title ? "" : "title",
+		parsed.prompt ? "" : "prompt",
+		parsed.primary_genre ? "" : "primary_genre",
+		parsed.tags.length > 0 ? "" : "tags",
+		parsed.mood ? "" : "mood",
+		parsed.energy === undefined ? "energy" : "",
+		parsed.bpm_min === undefined ? "bpm_min" : "",
+		parsed.bpm_max === undefined ? "bpm_max" : "",
+		parsed.vocal_style ? "" : "vocal_style",
+	].filter(Boolean);
+	if (missingFields.length > 0) {
+		await recordAppEvent(env, {
+			level: "info",
+			event: "radio_prompt_partial_fallback",
+			operation: "radio_prompt",
+			model: RADIO_TEXT_MODEL,
+			song_id: message.song_id,
+			request_id: message.request_id,
+			workflow_instance_id: radioSongWorkflowInstanceId(message.song_id),
+			duration_ms: Date.now() - promptStartedAt,
+			message: "Prompt model response omitted optional fields; using local fallbacks",
+			details: {
+				...radioMessageDetails(message),
+				missing_fields: missingFields,
+				title,
+				prompt_chars: prompt.length,
+				response_snippet: snippet(response),
+			},
+		});
+	}
 	return {
 		title,
 		prompt,
@@ -2534,21 +2933,25 @@ async function createRadioLyrics(
 		: "No listener request is active. Invent a complete lyric concept that fits the prompt.";
 	let lastSnippet: string | undefined;
 	for (let attempt = 0; attempt < 2; attempt++) {
+		const attemptNumber = attempt + 1;
+		const attemptStartedAt = Date.now();
 		const repairInstruction = attempt === 0
 			? ""
 			: `\nQuality repair: the previous lyric draft was rejected. Rewrite it longer, more specific, and more complete. Every section tag must be on its own line, followed by lyric lines. Minimum 900 characters and 20 non-tag lyric lines.`;
-		const response = await env.AI.run(
-			RADIO_LYRICS_MODEL,
-			{
-				messages: [
-					{
-					role: "system",
-					content:
-						"You are a professional lyricist for an always-on AI radio station. Return JSON only with lyrics, lyric_theme, and hook. Write original, singable lyrics for MiniMax Music 2.6. Use bracketed section tags only, such as [Intro], [Verse 1], [Pre Chorus], [Chorus], [Bridge], [Break], [Outro]. Put each section tag on its own line. Do not use labels like Verse: or Chorus:. Do not include markdown, commentary, chord names, metadata, artist names, song IDs, UUIDs, creative seeds, or copyrighted lyrics. Do not write the title as a heading or repeat it mechanically. Avoid generic filler, repeated station motifs, recycled narrative tropes, and overused rhymes around night/light/fire/sky unless the concept truly needs them. Keep total lyrics under 3000 characters so they fit safely under MiniMax's 3500-character limit.",
-					},
-					{
-						role: "user",
-						content: `${requestInstruction}
+		let response: unknown;
+		try {
+			response = await env.AI.run(
+				RADIO_LYRICS_MODEL,
+				{
+					messages: [
+						{
+						role: "system",
+						content:
+							"You are a professional lyricist for an always-on AI radio station. Return JSON only with lyrics, lyric_theme, and hook. Write original, singable lyrics for MiniMax Music 2.6. Use bracketed section tags only, such as [Intro], [Verse 1], [Pre Chorus], [Chorus], [Bridge], [Break], [Outro]. Put each section tag on its own line. Do not use labels like Verse: or Chorus:. Do not include markdown, commentary, chord names, metadata, artist names, song IDs, UUIDs, creative seeds, or copyrighted lyrics. Do not write the title as a heading or repeat it mechanically. Avoid generic filler, repeated station motifs, recycled narrative tropes, and overused rhymes around night/light/fire/sky unless the concept truly needs them. Keep total lyrics under 3000 characters so they fit safely under MiniMax's 3500-character limit.",
+						},
+						{
+							role: "user",
+							content: `${requestInstruction}
 Title for catalog reference only: ${title}
 Music prompt: ${plan.prompt}
 Genre: ${plan.primary_genre ?? "open genre"}
@@ -2563,25 +2966,68 @@ ${draftLyricInstruction}
 ${overusedNounInstruction}
 
 Write 900-1800 characters of lyrics with 20-40 non-tag lyric lines. Include at least [Verse 1], [Chorus], [Verse 2], [Bridge], and [Outro]. Put section tags on separate lines. Make the chorus memorable but not slogan-like. Keep imagery concrete, strange, and internally coherent. Treat retired noun motifs as a hard avoid list unless the listener request explicitly requires one. Make each line short enough to sing. Return only JSON.${repairInstruction}`,
-					},
-				],
-				response_format: LYRICS_RESPONSE_FORMAT,
-				max_tokens: 800,
-			},
-			{
-				gateway: {
-					id: env.AI_GATEWAY_ID,
-					requestTimeoutMs: 60_000,
-					retries: { maxAttempts: 1 },
+						},
+					],
+					response_format: LYRICS_RESPONSE_FORMAT,
+					max_tokens: 800,
 				},
-				signal: AbortSignal.timeout(60_000),
-			},
-		);
+				{
+					gateway: {
+						id: env.AI_GATEWAY_ID,
+						requestTimeoutMs: RADIO_LYRICS_TIMEOUT_MS,
+						retries: { maxAttempts: 1 },
+					},
+					signal: AbortSignal.timeout(RADIO_LYRICS_TIMEOUT_MS),
+				},
+			);
+		} catch (err) {
+			await recordAppEvent(env, {
+				level: "warn",
+				event: "radio_lyrics_model_error",
+				operation: "radio_lyrics",
+				model: RADIO_LYRICS_MODEL,
+				song_id: message.song_id,
+				request_id: message.request_id,
+				workflow_instance_id: radioSongWorkflowInstanceId(message.song_id),
+				duration_ms: Date.now() - attemptStartedAt,
+				message: errorMessage(err),
+				details: {
+					...radioMessageDetails(message),
+					...draftDetails(title, plan.prompt, undefined),
+					attempt_number: attemptNumber,
+					reason_type: errorKind(err),
+					timeout_ms: RADIO_LYRICS_TIMEOUT_MS,
+					...errorDetails(err),
+				},
+			});
+			throw err;
+		}
 
 		const parsed = parseLyricsResponse(response);
 		const lyrics = normalizeRadioLyrics(parsed.lyrics ?? "");
 		if (isUsableRadioLyrics(lyrics)) return lyrics;
 		lastSnippet = snippet(response) ?? "empty response";
+		await recordAppEvent(env, {
+			level: "warn",
+			event: "radio_lyrics_invalid_attempt",
+			operation: "radio_lyrics",
+			model: RADIO_LYRICS_MODEL,
+			song_id: message.song_id,
+			request_id: message.request_id,
+			workflow_instance_id: radioSongWorkflowInstanceId(message.song_id),
+			duration_ms: Date.now() - attemptStartedAt,
+			message: "Lyric model returned unusable lyrics",
+			details: {
+				...radioMessageDetails(message),
+				...draftDetails(title, plan.prompt, lyrics),
+				attempt_number: attemptNumber,
+				timeout_ms: RADIO_LYRICS_TIMEOUT_MS,
+				lyric_theme_chars: parsed.lyric_theme?.length ?? 0,
+				hook_chars: parsed.hook?.length ?? 0,
+				response_snippet: lastSnippet,
+				...lyricQualityDetails(lyrics),
+			},
+		});
 	}
 	throw new Error(`lyric model returned unusable lyrics: ${lastSnippet ?? "empty response"}`);
 }
@@ -2658,14 +3104,14 @@ Return JSON with too_similar, reason, nearest_title, and repair_guidance. If too
 			max_tokens: 300,
 		},
 		{
-			gateway: {
-				id: env.AI_GATEWAY_ID,
-				requestTimeoutMs: 30_000,
-				retries: { maxAttempts: 1 },
+				gateway: {
+					id: env.AI_GATEWAY_ID,
+					requestTimeoutMs: RADIO_REVIEW_TIMEOUT_MS,
+					retries: { maxAttempts: 1 },
+				},
+				signal: AbortSignal.timeout(RADIO_REVIEW_TIMEOUT_MS),
 			},
-			signal: AbortSignal.timeout(30_000),
-		},
-	);
+		);
 	return parseSimilarityReview(response);
 }
 
@@ -2708,14 +3154,14 @@ Create one fresh catalog title.`,
 			max_tokens: 80,
 		},
 		{
-			gateway: {
-				id: env.AI_GATEWAY_ID,
-				requestTimeoutMs: 30_000,
-				retries: { maxAttempts: 1 },
+				gateway: {
+					id: env.AI_GATEWAY_ID,
+					requestTimeoutMs: RADIO_REVIEW_TIMEOUT_MS,
+					retries: { maxAttempts: 1 },
+				},
+				signal: AbortSignal.timeout(RADIO_REVIEW_TIMEOUT_MS),
 			},
-			signal: AbortSignal.timeout(30_000),
-		},
-	);
+		);
 	const responseObject = response && typeof response === "object" ? response as Record<string, unknown> : undefined;
 	const parsed = responseObject?.response && typeof responseObject.response === "object"
 		? responseObject.response as Record<string, unknown>
@@ -2724,7 +3170,25 @@ Create one fresh catalog title.`,
 		? parsed.title
 		: looseStringField(extractTextResponse(response) ?? "", "title", []);
 	const title = sanitizeRadioTitle(rawTitle ?? "");
-	if (!title || title.split(/\s+/).length < 2 || containsEntropyLeak(title)) return fallbackTitle(message);
+	if (!title || title.split(/\s+/).length < 2 || containsEntropyLeak(title)) {
+		await recordAppEvent(env, {
+			level: "warn",
+			event: "radio_title_repair_invalid_response",
+			operation: "radio_title_repair",
+			model: RADIO_TEXT_MODEL,
+			song_id: message.song_id,
+			request_id: message.request_id,
+			workflow_instance_id: radioSongWorkflowInstanceId(message.song_id),
+			message: "Title repair response was unusable; using fallback title",
+			details: {
+				...radioMessageDetails(message),
+				prompt_chars: plan.prompt.length,
+				raw_title_chars: rawTitle?.length ?? 0,
+				response_snippet: snippet(response),
+			},
+		});
+		return fallbackTitle(message);
+	}
 	return title;
 }
 
