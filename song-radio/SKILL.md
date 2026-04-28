@@ -38,7 +38,7 @@ When asked to keep a station filled:
 4. Each workflow instance should:
    - Build a creative song brief from recent listener requests.
    - Run a text model to turn that brief into a compact, vivid MiniMax prompt with explicit non-repetition constraints.
-   - Run a stronger lyric-writing model with JSON mode to write original, structured lyrics using MiniMax-compatible section tags, then validate that the lyrics are long enough, sectioned, unique, and free of seed/UUID leakage.
+   - Run a fast structured-output lyric-writing model to write original, structured lyrics using MiniMax-compatible section tags, then validate that the lyrics are long enough, sectioned, unique, and free of seed/UUID leakage.
    - Compare the draft against recent songs and in-flight draft reservations before spending the music call. If the draft overlaps, regenerate once with reviewer guidance.
    - Reserve accepted draft fingerprints in the station Durable Object so same-batch workers can avoid each other's titles, prompts, and lyrics.
    - Call the music model with explicit lyrics and `lyrics_optimizer=false`. Keep `lyrics_optimizer=true` only as a fallback when the lyric-writing pass fails.

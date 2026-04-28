@@ -11,15 +11,18 @@ import {
 	LYRICS_MAX_CHARS,
 	RATE_LIMIT_WINDOW_MS,
 	RADIO_IN_FLIGHT_STALE_MS,
+	RADIO_LYRICS_FALLBACK_MODEL,
 	RADIO_LYRICS_MODEL,
 	RADIO_MAX_FULFILLED_REQUESTS,
 	RADIO_MAX_PLAYLIST,
 	RADIO_MAX_REQUESTS,
 	RADIO_COVER_MODELS,
 	RADIO_MUSIC_MODEL,
+	RADIO_REVIEW_MODEL,
 	RADIO_STATION_ID,
 	RADIO_TARGET_BACKLOG,
 	RADIO_TEXT_MODEL,
+	RADIO_TITLE_MODEL,
 	STALE_JOB_MS,
 	applyRateLimit,
 	audioObjectKey,
@@ -79,8 +82,8 @@ const APP_EVENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const RADIO_WORKFLOW_SUCCESS_RETENTION = "7 days";
 const RADIO_WORKFLOW_ERROR_RETENTION = "14 days";
 const RADIO_PROMPT_TIMEOUT_MS = 30_000;
-const RADIO_LYRICS_TIMEOUT_MS = 60_000;
-const RADIO_REVIEW_TIMEOUT_MS = 30_000;
+const RADIO_LYRICS_TIMEOUT_MS = 45_000;
+const RADIO_REVIEW_TIMEOUT_MS = 20_000;
 const SHORT_TEXT_STEP_CONFIG = {
 	retries: { limit: 2, delay: "30 seconds", backoff: "linear" },
 	timeout: "5 minutes",
@@ -118,13 +121,18 @@ const PROMPT_PLAN_RESPONSE_FORMAT = {
 const LYRICS_RESPONSE_FORMAT = {
 	type: "json_schema",
 	json_schema: {
-		type: "object",
-		properties: {
-			lyrics: { type: "string" },
-			lyric_theme: { type: "string" },
-			hook: { type: "string" },
+		name: "radio_lyrics_response",
+		strict: true,
+		schema: {
+			type: "object",
+			properties: {
+				lyrics: { type: "string" },
+				lyric_theme: { type: "string" },
+				hook: { type: "string" },
+			},
+			required: ["lyrics"],
+			additionalProperties: false,
 		},
-		required: ["lyrics"],
 	},
 } as const;
 const SIMILARITY_RESPONSE_FORMAT = {
@@ -1784,6 +1792,7 @@ async function persistSongCatalog(db: D1Database, song: RadioSong): Promise<void
 
 type RadioDraftPlan = {
 	lyrics?: string;
+	lyrics_model?: string;
 	plan: RadioPromptPlan;
 	title: string;
 };
@@ -1918,6 +1927,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 	let plan: RadioPromptPlan | undefined;
 	let title: string | undefined;
 	let lyrics: string | undefined;
+	let lyricsModel: string | undefined;
 	for (let attempt = 0; attempt < 2; attempt++) {
 		const draftAttemptStartedAt = Date.now();
 		const attemptNumber = attempt + 1;
@@ -1964,15 +1974,15 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 					level: "warn",
 					event: "model_fallback",
 					operation: "radio_title_repair",
-					model: RADIO_TEXT_MODEL,
+					model: RADIO_TITLE_MODEL,
 					song_id: message.song_id,
 					request_id: message.request_id,
 					workflow_instance_id: workflowInstanceId,
 					duration_ms: Date.now() - draftAttemptStartedAt,
 					message: errorMessage(err),
 					details: {
-							...baseDetails,
-							...draftDetails(title, activePlan.prompt, lyrics),
+						...baseDetails,
+						...draftDetails(title, activePlan.prompt, lyrics),
 						reason_type: errorKind(err),
 						timeout_ms: RADIO_REVIEW_TIMEOUT_MS,
 						...errorDetails(err),
@@ -1983,7 +1993,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 			title = await ensureCatalogDistinctTitle(env.DB, repairedTitle, message);
 		}
 		const lyricStartedAt = Date.now();
-			lyrics = await createRadioLyrics(activePlan, title, message, env, draftReservations).catch(async (err) => {
+		const lyricResult = await createRadioLyrics(activePlan, title, message, env, draftReservations).catch(async (err) => {
 			console.warn("Radio lyrics generation failed; falling back to MiniMax lyrics optimizer", {
 				error: err instanceof Error ? err.message : String(err),
 				song_id: message.song_id,
@@ -1999,8 +2009,8 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 				duration_ms: Date.now() - lyricStartedAt,
 				message: errorMessage(err),
 				details: {
-						...baseDetails,
-						...draftDetails(title, activePlan.prompt, undefined),
+					...baseDetails,
+					...draftDetails(title, activePlan.prompt, undefined),
 					reason_type: errorKind(err),
 					timeout_ms: RADIO_LYRICS_TIMEOUT_MS,
 					...errorDetails(err),
@@ -2008,7 +2018,9 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 			});
 			return undefined;
 		});
-			const overusedNounConflict = await reviewOverusedNounConflict({ title, prompt: activePlan.prompt, lyrics }, message, env).catch(async (err) => {
+		lyrics = lyricResult?.lyrics;
+		lyricsModel = lyricResult?.model;
+		const overusedNounConflict = await reviewOverusedNounConflict({ title, prompt: activePlan.prompt, lyrics }, message, env).catch(async (err) => {
 			console.warn("Radio overused noun review failed; continuing with similarity review", {
 				error: err instanceof Error ? err.message : String(err),
 				song_id: message.song_id,
@@ -2017,15 +2029,15 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 				level: "warn",
 				event: "model_fallback",
 				operation: "radio_overused_noun_review",
-				model: RADIO_TEXT_MODEL,
+				model: RADIO_REVIEW_MODEL,
 				song_id: message.song_id,
 				request_id: message.request_id,
 				workflow_instance_id: workflowInstanceId,
 				duration_ms: Date.now() - draftAttemptStartedAt,
 				message: errorMessage(err),
 				details: {
-						...baseDetails,
-						...draftDetails(title, activePlan.prompt, lyrics),
+					...baseDetails,
+					...draftDetails(title, activePlan.prompt, lyrics),
 					reason_type: errorKind(err),
 					timeout_ms: RADIO_REVIEW_TIMEOUT_MS,
 					...errorDetails(err),
@@ -2038,15 +2050,15 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 				level: "warn",
 				event: "radio_draft_rejected",
 				operation: "radio_draft_review",
-				model: RADIO_TEXT_MODEL,
+				model: RADIO_REVIEW_MODEL,
 				song_id: message.song_id,
 				request_id: message.request_id,
 				workflow_instance_id: workflowInstanceId,
 				duration_ms: Date.now() - draftAttemptStartedAt,
 				message: overusedNounConflict,
 				details: {
-						...baseDetails,
-						...draftDetails(title, activePlan.prompt, lyrics),
+					...baseDetails,
+					...draftDetails(title, activePlan.prompt, lyrics),
 					rejection_source: "overused_noun_review",
 				},
 			});
@@ -2054,7 +2066,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 			draftReservations = await station.draftReservations();
 			continue;
 		}
-			const similarity = await reviewDraftSimilarity({ title, prompt: activePlan.prompt, lyrics }, message, env, draftReservations).catch(async (err) => {
+		const similarity = await reviewDraftSimilarity({ title, prompt: activePlan.prompt, lyrics }, message, env, draftReservations).catch(async (err) => {
 			console.warn("Radio similarity review failed; using reservation checks only", {
 				error: err instanceof Error ? err.message : String(err),
 				song_id: message.song_id,
@@ -2063,15 +2075,15 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 				level: "warn",
 				event: "model_fallback",
 				operation: "radio_similarity",
-				model: RADIO_TEXT_MODEL,
+				model: RADIO_REVIEW_MODEL,
 				song_id: message.song_id,
 				request_id: message.request_id,
 				workflow_instance_id: workflowInstanceId,
 				duration_ms: Date.now() - draftAttemptStartedAt,
 				message: errorMessage(err),
 				details: {
-						...baseDetails,
-						...draftDetails(title, activePlan.prompt, lyrics),
+					...baseDetails,
+					...draftDetails(title, activePlan.prompt, lyrics),
 					reason_type: errorKind(err),
 					timeout_ms: RADIO_REVIEW_TIMEOUT_MS,
 					...errorDetails(err),
@@ -2085,15 +2097,15 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 				level: "warn",
 				event: "radio_draft_rejected",
 				operation: "radio_draft_review",
-				model: RADIO_TEXT_MODEL,
+				model: RADIO_REVIEW_MODEL,
 				song_id: message.song_id,
 				request_id: message.request_id,
 				workflow_instance_id: workflowInstanceId,
 				duration_ms: Date.now() - draftAttemptStartedAt,
-					message: repairGuidance,
-					details: {
-						...baseDetails,
-						...draftDetails(title, activePlan.prompt, lyrics),
+				message: repairGuidance,
+				details: {
+					...baseDetails,
+					...draftDetails(title, activePlan.prompt, lyrics),
 					rejection_source: "similarity_review",
 					nearest_title: similarity.nearest_title,
 					reason: similarity.reason,
@@ -2102,7 +2114,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 			draftReservations = await station.draftReservations();
 			continue;
 		}
-			const reservation = radioDraftReservation(message.song_id, title, activePlan.prompt, lyrics, message.request_text);
+		const reservation = radioDraftReservation(message.song_id, title, activePlan.prompt, lyrics, message.request_text);
 		const reserved = await station.reserveDraft(reservation);
 		if (reserved.accepted) break;
 		await recordAppEvent(env, {
@@ -2114,9 +2126,9 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 			workflow_instance_id: workflowInstanceId,
 			duration_ms: Date.now() - draftAttemptStartedAt,
 			message: reserved.reason || "Draft reservation rejected",
-				details: {
-					...baseDetails,
-					...draftDetails(title, activePlan.prompt, lyrics),
+			details: {
+				...baseDetails,
+				...draftDetails(title, activePlan.prompt, lyrics),
 				rejection_source: "draft_reservation",
 				conflict_song_id: reserved.conflict_song_id,
 				reservation_count: reserved.reservations.length,
@@ -2130,7 +2142,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 		throw new Error(reserved.reason || "Could not reserve a unique radio draft");
 	}
 	if (!plan || !title) throw new Error("Radio draft planning did not produce a song plan");
-	return { plan, title, lyrics };
+	return { plan, title, lyrics, lyrics_model: lyricsModel };
 }
 
 async function generateAndPersistRadioAudio(message: RadioGenerateMessage, env: Env, draft: RadioDraftPlan): Promise<PersistedRadioAudio> {
@@ -2338,9 +2350,11 @@ function buildRadioSongRecord(
 		request_id: message.request_id,
 		request_text: message.request_text,
 		lyrics: draft.lyrics,
-		lyrics_source: draft.lyrics ? RADIO_LYRICS_MODEL : "minimax-lyrics-optimizer-fallback",
+		lyrics_source: draft.lyrics ? draft.lyrics_model ?? RADIO_LYRICS_MODEL : "minimax-lyrics-optimizer-fallback",
 		music_model: RADIO_MUSIC_MODEL,
-		text_model: draft.lyrics ? `${RADIO_TEXT_MODEL}; lyrics:${RADIO_LYRICS_MODEL}` : RADIO_TEXT_MODEL,
+		text_model: draft.lyrics
+			? `prompt:${RADIO_TEXT_MODEL}; lyrics:${draft.lyrics_model ?? RADIO_LYRICS_MODEL}; review:${RADIO_REVIEW_MODEL}; title:${RADIO_TITLE_MODEL}`
+			: `prompt:${RADIO_TEXT_MODEL}; review:${RADIO_REVIEW_MODEL}; title:${RADIO_TITLE_MODEL}`,
 		creative_seed: message.creative_seed,
 		creative_axis: message.creative_axis,
 		creative_bpm: message.creative_bpm,
@@ -2673,8 +2687,6 @@ function coverModelInput(model: string, prompt: string, seed: number, negativePr
 			return diffusionCoverModelInput(prompt, seed, 4, 1, negativePrompt);
 		case "@cf/stabilityai/stable-diffusion-xl-base-1.0":
 			return diffusionCoverModelInput(prompt, seed, 12, 7.5, negativePrompt);
-		case "@cf/lykon/dreamshaper-8-lcm":
-			return diffusionCoverModelInput(prompt, seed, 8, 7.5, negativePrompt);
 		case "@cf/runwayml/stable-diffusion-v1-5-img2img":
 		case "@cf/runwayml/stable-diffusion-v1-5-inpainting":
 			return diffusionCoverModelInput(prompt, seed, 10, 7.5, negativePrompt);
@@ -2957,13 +2969,18 @@ type RadioLyricsPlan = {
 	hook?: string;
 };
 
+type RadioLyricsResult = {
+	lyrics: string;
+	model: string;
+};
+
 async function createRadioLyrics(
 	plan: RadioPromptPlan,
 	title: string,
 	message: RadioGenerateMessage,
 	env: Env,
 	draftReservations: RadioDraftReservation[] = [],
-): Promise<string> {
+): Promise<RadioLyricsResult> {
 	const recent = await recentSongContext(env.DB, message.station_id);
 	const recentTitleInstruction = recent.length > 0
 		? `Do not quote, reuse, or closely echo these recent titles or concepts: ${recent.slice(0, 20).map((item) => item.title).join(", ")}.`
@@ -2975,23 +2992,25 @@ async function createRadioLyrics(
 	const requestInstruction = message.request_text
 		? `Listener request to satisfy once: "${message.request_text}". Transform it into a complete lyric concept; do not paste the request as the lyrics.`
 		: "No listener request is active. Invent a complete lyric concept that fits the prompt.";
+	const lyricModels = [RADIO_LYRICS_MODEL, RADIO_LYRICS_FALLBACK_MODEL];
 	let lastSnippet: string | undefined;
-	for (let attempt = 0; attempt < 2; attempt++) {
+	for (let attempt = 0; attempt < lyricModels.length; attempt++) {
+		const model = lyricModels[attempt];
 		const attemptNumber = attempt + 1;
 		const attemptStartedAt = Date.now();
 		const repairInstruction = attempt === 0
 			? ""
-			: `\nQuality repair: the previous lyric draft was rejected. Rewrite it longer, more specific, and more complete. Every section tag must be on its own line, followed by lyric lines. Minimum 900 characters and 20 non-tag lyric lines.`;
+			: `\nQuality repair: the previous lyric draft was rejected or the primary lyric model failed. Rewrite it longer, more specific, and more complete. Every section tag must be on its own line, followed by lyric lines. Minimum 1100 characters and 24 non-tag lyric lines.`;
 		let response: unknown;
 		try {
 			response = await env.AI.run(
-				RADIO_LYRICS_MODEL,
+				model,
 				{
 					messages: [
 						{
 							role: "system",
 							content:
-								"You are a professional lyricist for an always-on AI radio station. Return JSON only with lyrics, lyric_theme, and hook. Write original, singable lyrics for MiniMax Music 2.6. Use bracketed section tags only, such as [Intro], [Verse 1], [Pre Chorus], [Chorus], [Bridge], [Break], [Outro]. Put each section tag on its own line. Do not use labels like Verse: or Chorus:. Do not include markdown, commentary, chord names, metadata, artist names, song IDs, UUIDs, creative seeds, or copyrighted lyrics. Do not write the title as a heading or repeat it mechanically. Avoid generic filler, repeated station motifs, recycled narrative tropes, and overused rhymes around night/light/fire/sky unless the concept truly needs them. Keep total lyrics under 3000 characters so they fit safely under MiniMax's 3500-character limit.",
+								"You are a professional songwriter for an always-on AI radio station. Return only valid JSON with lyrics, lyric_theme, and hook. Write original, singable lyrics for MiniMax Music 2.6. The lyrics string must contain bracketed section tags on their own lines, such as [Intro], [Verse 1], [Pre Chorus], [Chorus], [Verse 2], [Bridge], [Final Chorus], [Outro]. Do not use labels like Verse: or Chorus:. Do not include markdown, commentary, chord names, metadata, artist names, song IDs, UUIDs, creative seeds, or copyrighted lyrics. Avoid generic filler, repeated station motifs, recycled narrative tropes, and overused rhymes around night/light/fire/sky unless the concept truly needs them. Write enough substance for a complete 2-3 minute song while staying under MiniMax's 3500-character lyric limit.",
 						},
 						{
 							role: "user",
@@ -3009,11 +3028,16 @@ ${recentTitleInstruction}
 ${draftLyricInstruction}
 ${overusedNounInstruction}
 
-Write 900-1800 characters of lyrics with 20-40 non-tag lyric lines. Include at least [Verse 1], [Chorus], [Verse 2], [Bridge], and [Outro]. Put section tags on separate lines. Make the chorus memorable but not slogan-like. Keep imagery concrete, strange, and internally coherent. Treat retired noun motifs as a hard avoid list unless the listener request explicitly requires one. Make each line short enough to sing. Return only JSON.${repairInstruction}`,
+Write 1100-1800 characters of lyrics with 24-36 non-tag lyric lines. Use this section order: [Intro], [Verse 1], [Pre Chorus], [Chorus], [Verse 2], [Chorus], [Bridge], [Final Chorus], [Outro]. Put every section tag on its own line and put 2-6 short singable lines after most sections. Make the chorus memorable but not slogan-like. Keep imagery concrete, strange, and internally coherent. Treat retired noun motifs as a hard avoid list unless the listener request explicitly requires one. Return only JSON.${repairInstruction}`,
 						},
 					],
 					response_format: LYRICS_RESPONSE_FORMAT,
-					max_tokens: 800,
+					max_completion_tokens: 1200,
+					temperature: 0.85,
+					top_p: 0.9,
+					presence_penalty: 0.25,
+					frequency_penalty: 0.15,
+					chat_template_kwargs: { enable_thinking: false },
 				},
 				{
 					gateway: {
@@ -3029,7 +3053,7 @@ Write 900-1800 characters of lyrics with 20-40 non-tag lyric lines. Include at l
 				level: "warn",
 				event: "radio_lyrics_model_error",
 				operation: "radio_lyrics",
-				model: RADIO_LYRICS_MODEL,
+				model,
 				song_id: message.song_id,
 				request_id: message.request_id,
 				workflow_instance_id: radioSongWorkflowInstanceId(message.song_id),
@@ -3044,18 +3068,22 @@ Write 900-1800 characters of lyrics with 20-40 non-tag lyric lines. Include at l
 					...errorDetails(err),
 				},
 			});
+			if (attempt < lyricModels.length - 1) {
+				lastSnippet = errorMessage(err);
+				continue;
+			}
 			throw err;
 		}
 
 		const parsed = parseLyricsResponse(response);
 		const lyrics = normalizeRadioLyrics(parsed.lyrics ?? "");
-		if (isUsableRadioLyrics(lyrics)) return lyrics;
+		if (isUsableRadioLyrics(lyrics)) return { lyrics, model };
 		lastSnippet = snippet(response) ?? "empty response";
 		await recordAppEvent(env, {
 			level: "warn",
 			event: "radio_lyrics_invalid_attempt",
 			operation: "radio_lyrics",
-			model: RADIO_LYRICS_MODEL,
+			model,
 			song_id: message.song_id,
 			request_id: message.request_id,
 			workflow_instance_id: radioSongWorkflowInstanceId(message.song_id),
@@ -3121,7 +3149,7 @@ async function reviewDraftSimilarity(
 	if (comparable.length === 0) return { too_similar: false };
 
 	const response = await env.AI.run(
-		RADIO_TEXT_MODEL,
+		RADIO_REVIEW_MODEL,
 		{
 			messages: [
 				{
@@ -3144,8 +3172,17 @@ Lyrics excerpt: ${(item.lyrics ?? "").slice(0, 450) || "not available"}`).join("
 Return JSON with too_similar, reason, nearest_title, and repair_guidance. If too_similar is true, repair_guidance should tell the next prompt attempt how to move away without using a hard-coded replacement idea.`,
 				},
 			],
-			guided_json: SIMILARITY_RESPONSE_FORMAT.json_schema,
-			max_tokens: 300,
+			response_format: {
+				type: "json_schema",
+				json_schema: {
+					name: "radio_similarity_review",
+					strict: true,
+					schema: SIMILARITY_RESPONSE_FORMAT.json_schema,
+				},
+			},
+			max_completion_tokens: 220,
+			temperature: 0.1,
+			chat_template_kwargs: { enable_thinking: false },
 		},
 		{
 				gateway: {
@@ -3168,7 +3205,7 @@ async function repairRadioTitle(
 	const recent = await recentSongContext(env.DB, message.station_id);
 	const overusedNounInstruction = overusedNounRetirementInstruction(recent);
 	const response = await env.AI.run(
-		RADIO_TEXT_MODEL,
+		RADIO_TITLE_MODEL,
 		{
 			messages: [
 				{
@@ -3194,8 +3231,18 @@ ${overusedNounInstruction}
 Create one fresh catalog title.`,
 				},
 			],
-			guided_json: TITLE_RESPONSE_FORMAT.json_schema,
-			max_tokens: 80,
+			response_format: {
+				type: "json_schema",
+				json_schema: {
+					name: "radio_title_response",
+					strict: true,
+					schema: TITLE_RESPONSE_FORMAT.json_schema,
+				},
+			},
+			max_completion_tokens: 40,
+			temperature: 0.7,
+			top_p: 0.9,
+			chat_template_kwargs: { enable_thinking: false },
 		},
 		{
 				gateway: {
@@ -3212,14 +3259,14 @@ Create one fresh catalog title.`,
 		: responseObject;
 	const rawTitle = typeof parsed?.title === "string"
 		? parsed.title
-		: looseStringField(extractTextResponse(response) ?? "", "title", []);
+		: looseStringField(extractTextResponse(response) ?? "", "title", []) ?? extractTextResponse(response);
 	const title = sanitizeRadioTitle(rawTitle ?? "");
 	if (!title || title.split(/\s+/).length < 2 || containsEntropyLeak(title)) {
 		await recordAppEvent(env, {
 			level: "warn",
 			event: "radio_title_repair_invalid_response",
 			operation: "radio_title_repair",
-			model: RADIO_TEXT_MODEL,
+			model: RADIO_TITLE_MODEL,
 			song_id: message.song_id,
 			request_id: message.request_id,
 			workflow_instance_id: radioSongWorkflowInstanceId(message.song_id),

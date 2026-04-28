@@ -196,6 +196,7 @@ describe("extractTextResponse", () => {
 		expect(extractTextResponse(" hello ")).toBe("hello");
 		expect(extractTextResponse({ response: "song plan" })).toBe("song plan");
 		expect(extractTextResponse({ result: "fallback result" })).toBe("fallback result");
+		expect(extractTextResponse({ choices: [{ message: { content: "{\"lyrics\":\"line\"}" } }] })).toBe("{\"lyrics\":\"line\"}");
 	});
 });
 

@@ -215,20 +215,19 @@ export const RADIO_MAX_FULFILLED_REQUESTS = 100;
 export const RADIO_REQUEST_MAX_CHARS = 500;
 export const RADIO_IN_FLIGHT_STALE_MS = 45 * 60 * 1000;
 export const RADIO_TEXT_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct";
-export const RADIO_LYRICS_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+export const RADIO_REVIEW_MODEL = "@cf/zai-org/glm-4.7-flash";
+export const RADIO_TITLE_MODEL = "@cf/zai-org/glm-4.7-flash";
+export const RADIO_LYRICS_MODEL = "@cf/zai-org/glm-4.7-flash";
+export const RADIO_LYRICS_FALLBACK_MODEL = "@cf/moonshotai/kimi-k2.5";
 export const RADIO_MUSIC_MODEL = "minimax/music-2.6";
 export const RADIO_COVER_MODELS = [
 	"@cf/black-forest-labs/flux-1-schnell",
 	"@cf/black-forest-labs/flux-2-klein-4b",
 	"@cf/black-forest-labs/flux-2-klein-9b",
-	"@cf/black-forest-labs/flux-2-dev",
 	"@cf/leonardo/lucid-origin",
 	"@cf/leonardo/phoenix-1.0",
 	"@cf/bytedance/stable-diffusion-xl-lightning",
 	"@cf/stabilityai/stable-diffusion-xl-base-1.0",
-	"@cf/lykon/dreamshaper-8-lcm",
-	"@cf/runwayml/stable-diffusion-v1-5-img2img",
-	"@cf/runwayml/stable-diffusion-v1-5-inpainting",
 ] as const;
 export const RADIO_COVER_MODEL = RADIO_COVER_MODELS[0];
 export const LIBRARY_MAX_LIMIT = 100;
@@ -583,6 +582,25 @@ export function extractTextResponse(value: unknown): string | undefined {
 	for (const key of ["response", "result", "text", "content"]) {
 		const candidate = record[key];
 		if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+	}
+	const choices = record.choices;
+	if (Array.isArray(choices)) {
+		for (const choice of choices) {
+			if (!choice || typeof choice !== "object") continue;
+			const message = (choice as Record<string, unknown>).message;
+			if (!message || typeof message !== "object") continue;
+			const content = (message as Record<string, unknown>).content;
+			if (typeof content === "string" && content.trim()) return content.trim();
+			if (Array.isArray(content)) {
+				const text = content
+					.map((part) => part && typeof part === "object" && typeof (part as Record<string, unknown>).text === "string"
+						? (part as Record<string, unknown>).text
+						: "")
+					.join("")
+					.trim();
+				if (text) return text;
+			}
+		}
 	}
 	return undefined;
 }
