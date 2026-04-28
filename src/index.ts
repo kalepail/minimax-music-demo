@@ -2945,9 +2945,9 @@ async function createRadioLyrics(
 				{
 					messages: [
 						{
-						role: "system",
-						content:
-							"You are a professional lyricist for an always-on AI radio station. Return JSON only with lyrics, lyric_theme, and hook. Write original, singable lyrics for MiniMax Music 2.6. Use bracketed section tags only, such as [Intro], [Verse 1], [Pre Chorus], [Chorus], [Bridge], [Break], [Outro]. Put each section tag on its own line. Do not use labels like Verse: or Chorus:. Do not include markdown, commentary, chord names, metadata, artist names, song IDs, UUIDs, creative seeds, or copyrighted lyrics. Do not write the title as a heading or repeat it mechanically. Avoid generic filler, repeated station motifs, recycled narrative tropes, and overused rhymes around night/light/fire/sky unless the concept truly needs them. Keep total lyrics under 3000 characters so they fit safely under MiniMax's 3500-character limit.",
+							role: "system",
+							content:
+								"You are a professional lyricist for an always-on AI radio station. Return JSON only with lyrics, lyric_theme, and hook. Write original, singable lyrics for MiniMax Music 2.6. Use bracketed section tags only, such as [Intro], [Verse 1], [Pre Chorus], [Chorus], [Bridge], [Break], [Outro]. Put each section tag on its own line. Do not use labels like Verse: or Chorus:. Do not include markdown, commentary, chord names, metadata, artist names, song IDs, UUIDs, creative seeds, or copyrighted lyrics. Do not write the title as a heading or repeat it mechanically. Avoid generic filler, repeated station motifs, recycled narrative tropes, and overused rhymes around night/light/fire/sky unless the concept truly needs them. Keep total lyrics under 3000 characters so they fit safely under MiniMax's 3500-character limit.",
 						},
 						{
 							role: "user",
