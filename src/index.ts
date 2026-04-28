@@ -929,6 +929,9 @@ async function routeRequest(request: Request, env: Env, url = new URL(request.ur
 	if (url.pathname === "/api/admin/events" && request.method === "GET") {
 		return handleAppEvents(request, env);
 	}
+	if (url.pathname === "/api/admin/reconcile-metadata" && request.method === "POST") {
+		return handleMetadataReconcile(request, env);
+	}
 	if (url.pathname === "/api/library" && request.method === "GET") {
 		return handleLibrary(url, env);
 	}
@@ -1420,6 +1423,30 @@ async function handleAppEvents(request: Request, env: Env): Promise<Response> {
 		})),
 		limit,
 	});
+}
+
+async function handleMetadataReconcile(request: Request, env: Env): Promise<Response> {
+	const tokenEnv = env as Env & { ADMIN_MAINTENANCE_TOKEN?: string; COVER_BACKFILL_TOKEN?: string; OBSERVABILITY_TOKEN?: string };
+	const token = tokenEnv.ADMIN_MAINTENANCE_TOKEN ?? tokenEnv.OBSERVABILITY_TOKEN ?? tokenEnv.COVER_BACKFILL_TOKEN;
+	if (!token) return json({ error: "admin maintenance token not configured" }, 503);
+	if (request.headers.get("Authorization") !== `Bearer ${token}`) {
+		return json({ error: "unauthorized" }, 401);
+	}
+
+	const body = request.headers.get("Content-Type")?.includes("application/json")
+		? await request.json().catch(() => undefined)
+		: undefined;
+	const raw = body && typeof body === "object" ? body as { cursor?: unknown; dry_run?: unknown; limit?: unknown } : {};
+	const cursor = typeof raw.cursor === "number" && Number.isSafeInteger(raw.cursor) && raw.cursor > 0 ? raw.cursor : 0;
+	const limit = typeof raw.limit === "number" && Number.isSafeInteger(raw.limit)
+		? Math.min(75, Math.max(1, raw.limit))
+		: 25;
+	const result = await reconcileSongMetadata(env, {
+		cursor,
+		dryRun: raw.dry_run === true,
+		limit,
+	});
+	return json(result);
 }
 
 async function handleRadioAudio(request: Request, songId: string, env: Env): Promise<Response> {
@@ -2513,6 +2540,76 @@ async function backfillCoverArt(env: Env, limit: number, regenerate = false): Pr
 		}
 	}
 	return { checked: songs.length, generated, songs: updated, failures };
+}
+
+async function reconcileSongMetadata(
+	env: Env,
+	options: { cursor: number; dryRun: boolean; limit: number },
+): Promise<{
+	checked: number;
+	cursor: number;
+	dry_run: boolean;
+	failures: Array<{ error: string; id: string; title: string }>;
+	has_more: boolean;
+	missing: number;
+	next_cursor: number;
+	updated: number;
+}> {
+	const rows = await env.DB.prepare(
+		`SELECT id, station_id, title, prompt, cover_art_object_key, cover_art_prompt, cover_art_model,
+			cover_art_created_at, request_id, request_text, lyrics, lyrics_source, music_model, text_model,
+			creative_seed, creative_axis, creative_bpm, generation_input_json, prompt_plan_json,
+			format, audio_object_key, metadata_object_key, audio_content_type, primary_genre, genre_key, mood, energy, bpm_min, bpm_max, vocal_style,
+			created_at, completed_at, duration_ms
+		 FROM songs
+		 ORDER BY completed_at DESC, id DESC
+		 LIMIT ? OFFSET ?`,
+	).bind(options.limit + 1, options.cursor).all<SongRow>();
+	const batch = (rows.results ?? []).slice(0, options.limit);
+	const tags = await loadSongTags(env.DB, batch.map((row) => row.id));
+	let updated = 0;
+	let missing = 0;
+	const failures: Array<{ error: string; id: string; title: string }> = [];
+	for (const row of batch) {
+		const song = songFromRow(row, tags.get(row.id) ?? []);
+		let current: unknown;
+		try {
+			const existing = await env.AUDIO_BUCKET.get(song.metadata_object_key);
+			if (!existing) {
+				missing++;
+			} else {
+				current = await existing.json();
+			}
+		} catch (err) {
+			failures.push({ id: song.id, title: song.title, error: `metadata read failed: ${errorMessage(err)}` });
+		}
+		const currentJson = current && typeof current === "object" ? JSON.stringify(current) : "";
+		if (!currentJson || currentJson !== JSON.stringify(song)) {
+			updated++;
+			if (!options.dryRun) {
+				try {
+					await env.AUDIO_BUCKET.put(song.metadata_object_key, JSON.stringify(song, null, 2), {
+						httpMetadata: {
+							cacheControl: "no-store",
+							contentType: "application/json",
+						},
+					});
+				} catch (err) {
+					failures.push({ id: song.id, title: song.title, error: `metadata write failed: ${errorMessage(err)}` });
+				}
+			}
+		}
+	}
+	return {
+		checked: batch.length,
+		cursor: options.cursor,
+		dry_run: options.dryRun,
+		failures,
+		has_more: (rows.results ?? []).length > options.limit,
+		missing,
+		next_cursor: options.cursor + batch.length,
+		updated,
+	};
 }
 
 async function generateAndAttachCoverArt(env: Env, song: RadioSong, regenerate = false): Promise<void> {
