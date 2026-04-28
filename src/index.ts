@@ -2053,7 +2053,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 			draftReservations = await station.draftReservations();
 			continue;
 		}
-		const reservation = radioDraftReservation(message.song_id, title, activePlan.prompt, lyrics, message.request_text);
+		const reservation = radioDraftReservation(message.song_id, title, activePlan.prompt, message.request_text);
 		const reserved = await station.reserveDraft(reservation);
 		if (reserved.accepted) break;
 		await recordAppEvent(env, {
@@ -2415,8 +2415,7 @@ async function generateAndAttachCoverArt(env: Env, song: RadioSong, regenerate =
 	const overusedNouns = overusedNounsFromRecent(recent);
 	const prompt = coverArtPrompt(song, overusedNouns);
 	const negativePrompt = coverNegativePrompt(overusedNouns);
-	const imageSeed = stableNumberFromString(song.id);
-	const attempts = coverModelAttemptOrder(song.id);
+	const attempts = coverModelAttemptOrder();
 	const coverStartedAt = Date.now();
 	let image: Uint8Array | undefined;
 	let model: typeof RADIO_COVER_MODELS[number] | undefined;
@@ -2426,7 +2425,7 @@ async function generateAndAttachCoverArt(env: Env, song: RadioSong, regenerate =
 		try {
 			const response = await env.AI.run(
 				candidate,
-				coverModelInput(candidate, prompt, imageSeed, negativePrompt),
+				coverModelInput(candidate, prompt, negativePrompt),
 				coverModelOptions(env, candidate),
 			);
 			image = await extractImageBytes(response);
@@ -2511,7 +2510,7 @@ function coverArtPrompt(song: RadioSong, overusedNouns: ReadonlyArray<OverusedNo
 	const title = sanitizeCoverFragment(song.title, retiredWords);
 	const request = sanitizeCoverFragment(song.request_text ?? "", retiredWords);
 	const promptWorld = sanitizeCoverFragment(song.prompt, retiredWords, 360);
-	const lyricWorld = sanitizeCoverFragment(lyricVisualSeed(song.lyrics), retiredWords, 260);
+	const lyricWorld = sanitizeCoverFragment(lyricVisualContext(song.lyrics), retiredWords, 260);
 	const anchors = [
 		title ? `Concept anchor: ${title}.` : "",
 		request ? `Listener request anchor: ${request}.` : "",
@@ -2543,7 +2542,7 @@ function containsRetiredWord(value: string, retiredWords: ReadonlySet<string>): 
 	return (value.toLowerCase().match(/[a-z]{4,}/g) ?? []).some((word) => retiredWords.has(word));
 }
 
-function lyricVisualSeed(lyrics: string | undefined): string {
+function lyricVisualContext(lyrics: string | undefined): string {
 	if (!lyrics) return "";
 	return lyrics
 		.split("\n")
@@ -2553,36 +2552,31 @@ function lyricVisualSeed(lyrics: string | undefined): string {
 		.join(" ");
 }
 
-function coverModelForSong(songId: string): typeof RADIO_COVER_MODELS[number] {
-	return RADIO_COVER_MODELS[stableNumberFromString(songId) % RADIO_COVER_MODELS.length];
+function coverModelAttemptOrder(): Array<typeof RADIO_COVER_MODELS[number]> {
+	return [...RADIO_COVER_MODELS];
 }
 
-function coverModelAttemptOrder(songId: string): Array<typeof RADIO_COVER_MODELS[number]> {
-	const selected = coverModelForSong(songId);
-	return [selected, ...RADIO_COVER_MODELS.filter((model) => model !== selected)];
-}
-
-function coverModelInput(model: string, prompt: string, imageSeed: number, negativePrompt = COVER_NEGATIVE_PROMPT): Record<string, unknown> {
+function coverModelInput(model: string, prompt: string, negativePrompt = COVER_NEGATIVE_PROMPT): Record<string, unknown> {
 	switch (model) {
 		case "@cf/leonardo/lucid-origin":
-			return { prompt, negative_prompt: negativePrompt, steps: 8, guidance: 4.5, width: 1024, height: 1024, seed: imageSeed };
+			return { prompt, negative_prompt: negativePrompt, steps: 8, guidance: 4.5, width: 1024, height: 1024 };
 		case "@cf/leonardo/phoenix-1.0":
-			return { prompt, negative_prompt: negativePrompt, num_steps: 12, guidance: 4, width: 1024, height: 1024, seed: imageSeed };
+			return { prompt, negative_prompt: negativePrompt, num_steps: 12, guidance: 4, width: 1024, height: 1024 };
 		case "@cf/black-forest-labs/flux-2-klein-4b":
 		case "@cf/black-forest-labs/flux-2-klein-9b":
-			return multipartCoverModelInput({ prompt, width: "1024", height: "1024", guidance: "3.5", seed: String(imageSeed) });
+			return multipartCoverModelInput({ prompt, width: "1024", height: "1024", guidance: "3.5" });
 		case "@cf/black-forest-labs/flux-2-dev":
-			return multipartCoverModelInput({ prompt, width: "1024", height: "1024", steps: "8", guidance: "3.5", seed: String(imageSeed) });
+			return multipartCoverModelInput({ prompt, width: "1024", height: "1024", steps: "8", guidance: "3.5" });
 		case "@cf/bytedance/stable-diffusion-xl-lightning":
-			return diffusionCoverModelInput(prompt, imageSeed, 4, 1, negativePrompt);
+			return diffusionCoverModelInput(prompt, 4, 1, negativePrompt);
 		case "@cf/stabilityai/stable-diffusion-xl-base-1.0":
-			return diffusionCoverModelInput(prompt, imageSeed, 12, 7.5, negativePrompt);
+			return diffusionCoverModelInput(prompt, 12, 7.5, negativePrompt);
 		case "@cf/runwayml/stable-diffusion-v1-5-img2img":
 		case "@cf/runwayml/stable-diffusion-v1-5-inpainting":
-			return diffusionCoverModelInput(prompt, imageSeed, 10, 7.5, negativePrompt);
+			return diffusionCoverModelInput(prompt, 10, 7.5, negativePrompt);
 		case "@cf/black-forest-labs/flux-1-schnell":
 		default:
-			return { prompt, steps: 4, seed: imageSeed };
+			return { prompt, steps: 4 };
 	}
 }
 
@@ -2607,7 +2601,7 @@ function coverNegativePrompt(overusedNouns: ReadonlyArray<OverusedNounTerm> = []
 	return `${COVER_NEGATIVE_PROMPT}, repeated station motifs, recycled trope imagery, ${overusedNouns.map((entry) => entry.word).join(", ")}`;
 }
 
-function diffusionCoverModelInput(prompt: string, imageSeed: number, numSteps: number, guidance: number, negativePrompt = COVER_NEGATIVE_PROMPT): Record<string, unknown> {
+function diffusionCoverModelInput(prompt: string, numSteps: number, guidance: number, negativePrompt = COVER_NEGATIVE_PROMPT): Record<string, unknown> {
 	return {
 		prompt,
 		negative_prompt: negativePrompt,
@@ -2615,7 +2609,6 @@ function diffusionCoverModelInput(prompt: string, imageSeed: number, numSteps: n
 		width: 1024,
 		num_steps: numSteps,
 		guidance,
-		seed: imageSeed,
 	};
 }
 
@@ -3368,13 +3361,11 @@ function containsTechnicalLeak(value: string): boolean {
 	return /\b[a-z]+-[a-z]+-[a-f0-9]{6,}\b/i.test(value) || /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}/i.test(value);
 }
 
-function radioDraftReservation(songId: string, title: string, prompt: string, lyrics: string | undefined, requestText: string | undefined): RadioDraftReservation {
+function radioDraftReservation(songId: string, title: string, prompt: string, requestText: string | undefined): RadioDraftReservation {
 	return {
 		song_id: songId,
 		title,
 		prompt,
-		prompt_fingerprint: contentFingerprint(prompt),
-		lyrics_fingerprint: lyrics ? contentFingerprint(lyrics) : undefined,
 		request_text: requestText,
 		created_at: Date.now(),
 	};
@@ -3382,26 +3373,23 @@ function radioDraftReservation(songId: string, title: string, prompt: string, ly
 
 function draftReservationConflicts(a: RadioDraftReservation, b: RadioDraftReservation): boolean {
 	if (a.title.trim().toLowerCase() === b.title.trim().toLowerCase()) return true;
-	if (a.prompt_fingerprint && b.prompt_fingerprint && a.prompt_fingerprint === b.prompt_fingerprint) return true;
-	if (a.lyrics_fingerprint && b.lyrics_fingerprint && a.lyrics_fingerprint === b.lyrics_fingerprint) return true;
-	return fingerprintOverlap(a.prompt_fingerprint, b.prompt_fingerprint) >= 0.72 ||
-		(a.lyrics_fingerprint && b.lyrics_fingerprint ? fingerprintOverlap(a.lyrics_fingerprint, b.lyrics_fingerprint) >= 0.72 : false);
+	return termOverlap(contentTerms(a.prompt), contentTerms(b.prompt)) >= 0.72;
 }
 
 function makePromptUnique(prompt: string, message: RadioGenerateMessage, recentPrompts: string[]): string {
-	const normalized = normalizePromptFingerprint(prompt);
-	const mirrorsRecent = recentPrompts.some((recent) => normalizePromptFingerprint(recent) === normalized);
+	const normalized = normalizePromptShape(prompt);
+	const mirrorsRecent = recentPrompts.some((recent) => normalizePromptShape(recent) === normalized);
 	const base = prompt.trim();
 	if (!mirrorsRecent) return base.slice(0, 2000);
 	const requestContext = message.request_text ? ` Keep the listener request, but` : "";
 	return `${base} ${requestContext} avoid the previous arrangement shape entirely and use a new sonic premise, tempo feel, instrumentation palette, and lyrical point of view.`.slice(0, 2000);
 }
 
-function normalizePromptFingerprint(value: string): string {
+function normalizePromptShape(value: string): string {
 	return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/).slice(0, 80).join(" ");
 }
 
-function contentFingerprint(value: string): string {
+function contentTerms(value: string): string[] {
 	const counts = new Map<string, number>();
 	for (const token of value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/)) {
 		if (token.length < 4 || /^\d+$/.test(token)) continue;
@@ -3410,14 +3398,12 @@ function contentFingerprint(value: string): string {
 	return [...counts.entries()]
 		.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
 		.slice(0, 80)
-		.map(([token]) => token)
-		.join(" ");
+		.map(([token]) => token);
 }
 
-function fingerprintOverlap(a: string | undefined, b: string | undefined): number {
-	if (!a || !b) return 0;
-	const left = new Set(a.split(/\s+/).filter(Boolean));
-	const right = new Set(b.split(/\s+/).filter(Boolean));
+function termOverlap(a: string[], b: string[]): number {
+	const left = new Set(a);
+	const right = new Set(b);
 	if (left.size === 0 || right.size === 0) return 0;
 	let intersection = 0;
 	for (const token of left) {
@@ -3450,15 +3436,6 @@ function fallbackTitle(message: RadioGenerateMessage): string {
 
 function isFallbackTitle(title: string): boolean {
 	return title.trim().toLowerCase() === "untitled radio track";
-}
-
-function stableNumberFromString(value: string): number {
-	let result = 2166136261;
-	for (let i = 0; i < value.length; i++) {
-		result ^= value.charCodeAt(i);
-		result = Math.imul(result, 16777619);
-	}
-	return result >>> 0;
 }
 
 function titleCaseWords(value: string): string {

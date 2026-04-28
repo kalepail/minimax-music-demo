@@ -41,7 +41,7 @@ When asked to keep a station filled:
    - Run a text model to turn the listener request plus recent catalog context into a compact, vivid MiniMax prompt with explicit non-repetition constraints.
    - Run a fast structured-output lyric-writing model to write original, structured lyrics using only the prompt plan, listener request, and bounded avoid lists, then validate that the lyrics are long enough, sectioned, unique, and free of technical-token leakage.
    - Compare the draft against recent songs and in-flight draft reservations in a dedicated review call before spending the music call. If the draft overlaps, regenerate once with reviewer guidance.
-   - Reserve accepted draft fingerprints in the station Durable Object so same-batch workers can avoid each other's titles, prompts, and lyrics.
+   - Reserve accepted draft titles and prompt summaries in the station Durable Object so same-batch workers can avoid overlapping concepts.
    - Call the music model with explicit lyrics and `lyrics_optimizer=false`. Keep `lyrics_optimizer=true` only as a fallback when the lyric-writing pass fails.
    - Stream the returned audio URL into R2.
    - Generate square cover art with a Workers AI text-to-image model and store it in R2. Rotate between supported models for variety, and keep the prompt visual-only so model attention stays on scene/color/texture instead of written language.

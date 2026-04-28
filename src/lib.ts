@@ -30,8 +30,6 @@ export type RadioDraftReservation = {
 	song_id: string;
 	title: string;
 	prompt: string;
-	prompt_fingerprint: string;
-	lyrics_fingerprint?: string;
 	request_text?: string;
 	created_at: number;
 };
