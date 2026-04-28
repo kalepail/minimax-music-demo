@@ -70,6 +70,7 @@ export type RadioSong = {
 	metadata_object_key: string;
 	audio_content_type: string;
 	primary_genre?: string;
+	genre_key?: string;
 	tags: string[];
 	mood?: string;
 	energy?: number;
@@ -347,7 +348,7 @@ export function radioCoverObjectKey(songId: string): string {
 }
 
 export function genreStationId(genre: string): string {
-	return `genre:${slugifyFacet(genre)}`;
+	return `genre:${slugifyFacet(canonicalGenreKey(genre) ?? genre)}`;
 }
 
 export function stationName(id: string, genre?: string): string {
@@ -362,6 +363,19 @@ export function normalizeFacet(value: unknown, maxLength = 80): string | undefin
 	const normalized = value.trim().toLowerCase().replace(/\s+/g, " ");
 	if (!normalized) return undefined;
 	return normalized.slice(0, maxLength);
+}
+
+export function canonicalGenreKey(value: unknown): string | undefined {
+	const normalized = normalizeFacet(value);
+	if (!normalized) return undefined;
+	const tokens = normalized
+		.replace(/[\/_+-]+/g, " ")
+		.replace(/&/g, " and ")
+		.split(/\s+/)
+		.map((token) => token.trim())
+		.filter((token) => token && token !== "and" && token !== "with" && token !== "elements");
+	if (tokens.length === 0) return undefined;
+	return [...new Set(tokens)].sort((a, b) => a.localeCompare(b)).join(" ").slice(0, 80);
 }
 
 export function normalizeTags(value: unknown): string[] {

@@ -809,9 +809,10 @@
 				libraryGenreEl.innerHTML = '<option value="">All genres</option>';
 				for (const genre of genres) {
 					const value = genre.genre;
+					const label = genre.label || value;
 					const stationOption = document.createElement("option");
 					stationOption.value = value;
-					stationOption.textContent = `${value} (${genre.count})`;
+					stationOption.textContent = `${label} (${genre.count})`;
 					stationGenreEl.append(stationOption);
 					const libraryOption = stationOption.cloneNode(true);
 					libraryGenreEl.append(libraryOption);

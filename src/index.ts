@@ -19,6 +19,7 @@ import {
 	applyRateLimit,
 	audioObjectKey,
 	audioResponseHeaders,
+	canonicalGenreKey,
 	clientRateLimitKey,
 	extractAudioUrl,
 	extractTextResponse,
@@ -223,7 +224,7 @@ export class MusicJob extends DurableObject<Env> {
 		let errorMsg: string | undefined;
 		try {
 			result = await this.env.AI.run(
-				"minimax/music-2.6",
+				RADIO_MUSIC_MODEL,
 				aiInput,
 				{
 					gateway: {
@@ -879,13 +880,13 @@ async function handleRadioStations(env: Env): Promise<Response> {
 			 LIMIT 100`,
 		).all<RadioStationRecord>(),
 		env.DB.prepare(
-			`SELECT primary_genre AS genre, COUNT(*) AS count
+			`SELECT genre_key AS genre, MIN(primary_genre) AS label, COUNT(*) AS count
 			 FROM songs
-			 WHERE primary_genre IS NOT NULL AND primary_genre != ''
-			 GROUP BY primary_genre
-			 ORDER BY count DESC, primary_genre ASC
+			 WHERE genre_key IS NOT NULL AND genre_key != ''
+			 GROUP BY genre_key
+			 ORDER BY count DESC, label ASC
 			 LIMIT 100`,
-		).all<{ genre: string; count: number }>(),
+		).all<{ genre: string; label: string; count: number }>(),
 	]);
 
 	return json({
@@ -906,7 +907,7 @@ async function handleLibrarySong(songId: string, env: Env): Promise<Response> {
 		`SELECT id, station_id, title, prompt, cover_art_object_key, cover_art_prompt, cover_art_model,
 			cover_art_created_at, request_id, request_text, lyrics, lyrics_source, music_model, text_model,
 			creative_seed, creative_axis, creative_bpm, generation_input_json, prompt_plan_json,
-			format, audio_object_key, metadata_object_key, audio_content_type, primary_genre, mood, energy, bpm_min, bpm_max, vocal_style,
+			format, audio_object_key, metadata_object_key, audio_content_type, primary_genre, genre_key, mood, energy, bpm_min, bpm_max, vocal_style,
 			created_at, completed_at, duration_ms
 		 FROM songs
 		 WHERE id = ?`,
@@ -1016,6 +1017,7 @@ type SongRow = {
 	metadata_object_key: string;
 	audio_content_type: string;
 	primary_genre: string | null;
+	genre_key: string | null;
 	mood: string | null;
 	energy: number | null;
 	bpm_min: number | null;
@@ -1034,8 +1036,8 @@ async function listSongs(db: D1Database, query: LibraryQuery): Promise<{ songs: 
 		params.push(query.station_id);
 	}
 	if (query.genre) {
-		where.push("s.primary_genre = ?");
-		params.push(query.genre);
+		where.push("s.genre_key = ?");
+		params.push(canonicalGenreKey(query.genre) ?? query.genre);
 	}
 	if (query.mood) {
 		where.push("s.mood = ?");
@@ -1053,7 +1055,7 @@ async function listSongs(db: D1Database, query: LibraryQuery): Promise<{ songs: 
 			s.cover_art_model, s.cover_art_created_at, s.request_text, s.format, s.audio_object_key,
 			s.request_id, s.lyrics, s.lyrics_source, s.music_model, s.text_model, s.creative_seed,
 			s.creative_axis, s.creative_bpm, s.generation_input_json, s.prompt_plan_json,
-			s.metadata_object_key, s.audio_content_type, s.primary_genre, s.mood, s.energy, s.bpm_min,
+			s.metadata_object_key, s.audio_content_type, s.primary_genre, s.genre_key, s.mood, s.energy, s.bpm_min,
 			s.bpm_max, s.vocal_style, s.created_at, s.completed_at, s.duration_ms
 		 FROM songs s
 		 ${whereSql}
@@ -1082,7 +1084,7 @@ async function loadSongsByIds(db: D1Database, songIds: string[]): Promise<Map<st
 				s.cover_art_model, s.cover_art_created_at, s.request_text, s.format, s.audio_object_key,
 				s.request_id, s.lyrics, s.lyrics_source, s.music_model, s.text_model, s.creative_seed,
 				s.creative_axis, s.creative_bpm, s.generation_input_json, s.prompt_plan_json,
-				s.metadata_object_key, s.audio_content_type, s.primary_genre, s.mood, s.energy, s.bpm_min,
+				s.metadata_object_key, s.audio_content_type, s.primary_genre, s.genre_key, s.mood, s.energy, s.bpm_min,
 				s.bpm_max, s.vocal_style, s.created_at, s.completed_at, s.duration_ms
 			 FROM songs s
 			 WHERE s.id IN (${placeholders})`,
@@ -1167,6 +1169,7 @@ function songFromRow(row: SongRow, tags: string[]): RadioSong {
 		metadata_object_key: row.metadata_object_key,
 		audio_content_type: row.audio_content_type,
 		primary_genre: row.primary_genre ?? undefined,
+		genre_key: row.genre_key ?? canonicalGenreKey(row.primary_genre),
 		tags,
 		mood: row.mood ?? undefined,
 		energy: row.energy ?? undefined,
@@ -1194,9 +1197,9 @@ async function persistSongCatalog(db: D1Database, song: RadioSong): Promise<void
 	const tags = normalizeTags(song.tags);
 	const station: RadioStationRecord = {
 		id: song.station_id,
-		name: stationName(song.station_id, song.primary_genre),
+		name: stationName(song.station_id, song.genre_key ?? song.primary_genre),
 		description: song.primary_genre ? `Continuous ${song.primary_genre} radio generated from listener requests.` : "Continuous AI radio generated from listener requests.",
-		genre_filter: song.station_id.startsWith("genre:") ? song.primary_genre : undefined,
+		genre_filter: song.station_id.startsWith("genre:") ? song.genre_key ?? canonicalGenreKey(song.primary_genre) : undefined,
 		created_at: now,
 		updated_at: now,
 	};
@@ -1205,12 +1208,12 @@ async function persistSongCatalog(db: D1Database, song: RadioSong): Promise<void
 			`INSERT INTO songs (
 				id, station_id, title, prompt, cover_art_object_key, cover_art_prompt, cover_art_model,
 				cover_art_created_at, request_id, request_text, format, audio_object_key, metadata_object_key,
-				audio_content_type, primary_genre, mood, energy, bpm_min, bpm_max, vocal_style,
+				audio_content_type, primary_genre, genre_key, mood, energy, bpm_min, bpm_max, vocal_style,
 				lyrics, lyrics_source, music_model, text_model, creative_seed, creative_axis, creative_bpm,
 				generation_input_json, prompt_plan_json,
 				created_at, completed_at, duration_ms
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(id) DO UPDATE SET
 				station_id = excluded.station_id,
 				title = excluded.title,
@@ -1226,6 +1229,7 @@ async function persistSongCatalog(db: D1Database, song: RadioSong): Promise<void
 				metadata_object_key = excluded.metadata_object_key,
 				audio_content_type = excluded.audio_content_type,
 				primary_genre = excluded.primary_genre,
+				genre_key = excluded.genre_key,
 				mood = excluded.mood,
 				energy = excluded.energy,
 				bpm_min = excluded.bpm_min,
@@ -1259,6 +1263,7 @@ async function persistSongCatalog(db: D1Database, song: RadioSong): Promise<void
 			song.metadata_object_key,
 			song.audio_content_type,
 			song.primary_genre ?? null,
+			song.genre_key ?? canonicalGenreKey(song.primary_genre) ?? null,
 			song.mood ?? null,
 			song.energy ?? null,
 			song.bpm_min ?? null,
@@ -1419,7 +1424,7 @@ async function generateRadioSong(message: RadioGenerateMessage, env: Env): Promi
 			request_id: message.request_id,
 			request_text: message.request_text,
 			lyrics,
-			lyrics_source: lyrics ? "workers-ai-llama-3.3-70b" : "minimax-lyrics-optimizer-fallback",
+			lyrics_source: lyrics ? RADIO_LYRICS_MODEL : "minimax-lyrics-optimizer-fallback",
 			music_model: RADIO_MUSIC_MODEL,
 			text_model: lyrics ? `${RADIO_TEXT_MODEL}; lyrics:${RADIO_LYRICS_MODEL}` : RADIO_TEXT_MODEL,
 			creative_seed: message.creative_seed,
@@ -1432,6 +1437,7 @@ async function generateRadioSong(message: RadioGenerateMessage, env: Env): Promi
 			metadata_object_key: metadataObjectKey,
 			audio_content_type: contentType,
 			primary_genre: plan.primary_genre,
+			genre_key: canonicalGenreKey(plan.primary_genre),
 			tags: plan.tags,
 			mood: plan.mood,
 			energy: plan.energy,
@@ -1461,7 +1467,7 @@ async function backfillCoverArt(env: Env, limit: number, regenerate = false): Pr
 		`SELECT id, station_id, title, prompt, cover_art_object_key, cover_art_prompt, cover_art_model,
 			cover_art_created_at, request_id, request_text, lyrics, lyrics_source, music_model, text_model,
 			creative_seed, creative_axis, creative_bpm, generation_input_json, prompt_plan_json,
-			format, audio_object_key, metadata_object_key, audio_content_type, primary_genre, mood, energy, bpm_min, bpm_max, vocal_style,
+			format, audio_object_key, metadata_object_key, audio_content_type, primary_genre, genre_key, mood, energy, bpm_min, bpm_max, vocal_style,
 			created_at, completed_at, duration_ms
 		 FROM songs
 		 WHERE cover_art_object_key IS NULL OR cover_art_object_key = '' OR cover_art_prompt IS NULL OR substr(cover_art_prompt, 1, ?) != ? OR ? = 1
@@ -1908,7 +1914,7 @@ async function ensureCatalogDistinctTitle(db: D1Database, title: string, message
 	const existing = await db.prepare(
 		`SELECT id
 		 FROM songs
-		 WHERE lower(title) = lower(?)
+		 WHERE title = ? COLLATE NOCASE
 		 LIMIT 1`,
 	).bind(clean).first<{ id: string }>();
 	if (!existing) return clean;
@@ -2045,6 +2051,7 @@ function normalizeStoredRadioSong(song: Partial<RadioSong>, message: RadioGenera
 		metadata_object_key: typeof song.metadata_object_key === "string" && song.metadata_object_key ? song.metadata_object_key : radioMetadataObjectKey(message.song_id),
 		audio_content_type: typeof song.audio_content_type === "string" && song.audio_content_type ? song.audio_content_type : "audio/mpeg",
 		primary_genre: song.primary_genre,
+		genre_key: typeof song.genre_key === "string" && song.genre_key ? song.genre_key : canonicalGenreKey(song.primary_genre),
 		tags: normalizeTags(song.tags),
 		mood: song.mood,
 		energy: song.energy,

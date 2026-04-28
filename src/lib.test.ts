@@ -8,6 +8,7 @@ import {
 	applyRateLimit,
 	audioObjectKey,
 	audioResponseHeaders,
+	canonicalGenreKey,
 	clientRateLimitKey,
 	extractAudioUrl,
 	extractTextResponse,
@@ -205,6 +206,8 @@ describe("radio helpers", () => {
 		expect(radioAudioObjectKey("song-123", "mp3")).toBe("radio/audio/song-123.mp3");
 		expect(radioMetadataObjectKey("song-123")).toBe("radio/metadata/song-123.json");
 		expect(genreStationId("Cosmic Disco!")).toBe("genre:cosmic-disco");
+		expect(genreStationId("Experimental/Electronic")).toBe("genre:electronic-experimental");
+		expect(canonicalGenreKey("experimental electronic")).toBe("electronic experimental");
 	});
 
 	it("normalizes listener requests", () => {
