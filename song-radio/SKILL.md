@@ -19,9 +19,9 @@ Use this skill to design, build, or operate an always-on AI music station on Clo
 Use this shape unless the repo strongly points elsewhere:
 
 - Worker HTTP routes for station APIs and static assets.
-- Durable Object for station coordination: playlist, recent listener requests, in-flight song IDs, and fill decisions.
-- Workflow for generation work. Use one workflow instance per song so long-running multi-step jobs can retry individual phases and recover existing R2/D1 state.
-- R2 for permanent audio and metadata storage.
+- Durable Object for station coordination: recent listener requests, in-flight song IDs, draft reservations, and fill decisions. Do not store completed song metadata or playlist copies in the Durable Object.
+- Workflow for generation work. Use one workflow instance per song so long-running multi-step jobs can retry individual phases and recover existing D1 state.
+- R2 for permanent audio and cover art storage.
 - D1 for the permanent catalog: song rows, tags, stations, sort/filter fields, and pagination.
 - Cron trigger for automatic top-up, plus a manual fill endpoint for immediate batches.
 - Queue only when a future change needs a lightweight handoff without multi-step durability.
@@ -45,9 +45,8 @@ When asked to keep a station filled:
    - Call the music model with explicit lyrics and `lyrics_optimizer=false`. Keep `lyrics_optimizer=true` only as a fallback when the lyric-writing pass fails.
    - Stream the returned audio URL into R2.
    - Generate square cover art with a Workers AI text-to-image model and store it in R2. Rotate between supported models for variety, and keep the prompt visual-only so model attention stays on scene/color/texture instead of written language.
-   - Store a small metadata JSON record in R2.
    - Insert or update a D1 catalog row and tag rows.
-   - Notify the station Durable Object so the playlist updates.
+   - Notify the station Durable Object so in-flight and request coordination state is cleared.
 5. Keep audio object keys unique, stable, and append-only.
 
 ## Prompt direction
@@ -119,11 +118,11 @@ Prefer these route shapes when building a web UI:
 
 ## Operational guardrails
 
-- Keep workflow params small and serializable; store large generated artifacts in R2 or Durable Object storage.
+- Keep workflow params small and serializable; store large generated artifacts in R2 and catalog metadata in D1.
 - Use stable workflow instance IDs for each song and reconcile skipped `createBatch` results before reporting jobs as queued.
 - Cap concurrency deliberately. A target of 10 in-flight songs is a reasonable default for this demo.
 - Keep R2 object keys unique because concurrent writes to the same key are rate-limited.
-- Keep D1 writes idempotent. On Workflow retry, recover from existing R2 metadata and upsert D1 before marking the station song complete.
+- Keep D1 writes idempotent. On Workflow retry, recover existing completed song metadata from D1 before marking the station song complete.
 - Add D1 indexes for every UI filter or sort path that will be used repeatedly.
 - Add an explicit `RADIO_AUTOFILL` flag so cron can be disabled without removing the code.
 - Run `npx wrangler types` after changing bindings.

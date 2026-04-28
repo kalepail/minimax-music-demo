@@ -18,8 +18,6 @@ export type RadioInFlight = {
 	queued_at: number;
 	workflow_instance_id?: string;
 	request_id?: string;
-	request_created_at?: number;
-	request_text?: string;
 };
 
 export type FulfilledRadioRequest = RadioRequest & {
@@ -64,7 +62,6 @@ export type RadioSong = {
 	prompt_plan?: RadioPromptPlan;
 	format: MusicInput["format"];
 	audio_object_key: string;
-	metadata_object_key: string;
 	audio_content_type: string;
 	primary_genre?: string;
 	genre_key?: string;
@@ -384,10 +381,6 @@ function looksLikeMp3Start(bytes: Uint8Array, offset: number): boolean {
 
 export function radioAudioObjectKey(songId: string, format: MusicInput["format"]): string {
 	return `radio/audio/${songId}.${format}`;
-}
-
-export function radioMetadataObjectKey(songId: string): string {
-	return `radio/metadata/${songId}.json`;
 }
 
 export function radioCoverObjectKey(songId: string): string {

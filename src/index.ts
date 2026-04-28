@@ -48,7 +48,6 @@ import {
 	publicStatus,
 	radioAudioObjectKey,
 	radioCoverObjectKey,
-	radioMetadataObjectKey,
 	overusedNounMatches,
 	overusedNounTerms,
 	shouldCleanUp,
@@ -465,11 +464,18 @@ export class MusicJob extends DurableObject<Env> {
 
 export class RadioStation extends DurableObject<Env> {
 	async status(): Promise<RadioStatus> {
-		const { playlist, requests, fulfilled } = await this.reconcileRequests();
-		const inFlight = await this.inFlight();
+		const [playlist, storedRequests, inFlight] = await Promise.all([
+			loadStationPlaylist(this.env.DB, RADIO_STATION_ID),
+			this.requests(),
+			this.inFlight(),
+		]);
+		const requests = removeFulfilledRequests(storedRequests, playlist);
+		if (requests.length !== storedRequests.length) {
+			await this.ctx.storage.put("requests", requests);
+		}
 		return {
 			playlist,
-			fulfilled_requests: fulfilled,
+			fulfilled_requests: fulfilledRequestsFromSongs(playlist),
 			requests,
 			in_flight: inFlight,
 			target_backlog: RADIO_TARGET_BACKLOG,
@@ -546,8 +552,6 @@ export class RadioStation extends DurableObject<Env> {
 				queued_at: queuedAt,
 				workflow_instance_id: workflowInstanceId,
 				request_id: request?.id,
-				request_created_at: request?.created_at,
-				request_text: request?.text,
 			};
 			queuedInFlight.push(inFlight);
 			nextInFlight.push(inFlight);
@@ -609,24 +613,17 @@ export class RadioStation extends DurableObject<Env> {
 	}
 
 	async complete(song: RadioSong): Promise<void> {
-		const playlist = [song, ...(await this.playlist()).filter((item) => item.id !== song.id)].slice(0, RADIO_MAX_PLAYLIST);
 		const existingInFlight = await this.inFlight();
 		const completedInFlight = existingInFlight.find((item) => item.song_id === song.id);
 		const inFlight = existingInFlight.filter((item) => item.song_id !== song.id);
 		const requests = await this.requests();
-		const fulfilled = await this.fulfilledRequests();
 		const fulfilledRequest = requestFulfillment(song, completedInFlight);
-		const nextFulfilled = fulfilledRequest
-			? [fulfilledRequest, ...fulfilled.filter((item) => item.id !== fulfilledRequest.id)].slice(0, RADIO_MAX_FULFILLED_REQUESTS)
-			: fulfilled;
 		const nextRequests = fulfilledRequest
 			? requests.filter((item) => item.id !== fulfilledRequest.id)
 			: requests;
 		await Promise.all([
-			this.ctx.storage.put("playlist", playlist),
 			this.ctx.storage.put("in_flight", inFlight),
 			this.ctx.storage.put("requests", nextRequests),
-			this.ctx.storage.put("fulfilled_requests", nextFulfilled),
 			this.removeDraftReservation(song.id),
 		]);
 	}
@@ -660,7 +657,7 @@ export class RadioStation extends DurableObject<Env> {
 		const existingInFlight = await this.inFlight();
 		const failed = existingInFlight.find((item) => item.song_id === songId);
 		const inFlight = existingInFlight.filter((item) => item.song_id !== songId);
-		const requests = failed?.request_id && failed.request_text
+		const requests = failed?.request_id
 			? releaseRequestAssignment(await this.requests(), failed)
 			: await this.requests();
 		await Promise.all([
@@ -671,51 +668,8 @@ export class RadioStation extends DurableObject<Env> {
 		]);
 	}
 
-	private async reconcileRequests(): Promise<{ playlist: RadioSong[]; requests: RadioRequest[]; fulfilled: FulfilledRadioRequest[] }> {
-		const [storedPlaylist, requests, fulfilled] = await Promise.all([
-			this.playlist(),
-			this.requests(),
-			this.fulfilledRequests(),
-		]);
-		const playlist = await this.refreshPlaylistCatalog(storedPlaylist);
-		if (requests.length === 0) return { playlist, requests, fulfilled };
-
-		const nextRequests = [...requests];
-		const nextFulfilled = [...fulfilled];
-		for (const request of requests) {
-			const song = playlist.find((item) => item.request_id === request.id || item.request_text === request.text);
-			if (!song) continue;
-			const index = nextRequests.findIndex((item) => item.id === request.id);
-			if (index >= 0) nextRequests.splice(index, 1);
-			if (!nextFulfilled.some((item) => item.id === request.id)) {
-				nextFulfilled.unshift({
-					...request,
-					fulfilled_at: song.completed_at,
-					song_id: song.id,
-					song_title: song.title,
-				});
-			}
-		}
-
-		if (nextRequests.length !== requests.length || nextFulfilled.length !== fulfilled.length) {
-			await Promise.all([
-				this.ctx.storage.put("requests", nextRequests),
-				this.ctx.storage.put("fulfilled_requests", nextFulfilled.slice(0, RADIO_MAX_FULFILLED_REQUESTS)),
-			]);
-		}
-		return { playlist, requests: nextRequests, fulfilled: nextFulfilled.slice(0, RADIO_MAX_FULFILLED_REQUESTS) };
-	}
-
-	private async playlist(): Promise<RadioSong[]> {
-		return (await this.ctx.storage.get<RadioSong[]>("playlist")) ?? [];
-	}
-
 	private async requests(): Promise<RadioRequest[]> {
 		return (await this.ctx.storage.get<RadioRequest[]>("requests")) ?? [];
-	}
-
-	private async fulfilledRequests(): Promise<FulfilledRadioRequest[]> {
-		return (await this.ctx.storage.get<FulfilledRadioRequest[]>("fulfilled_requests")) ?? [];
 	}
 
 	private async inFlight(): Promise<RadioInFlight[]> {
@@ -735,58 +689,33 @@ export class RadioStation extends DurableObject<Env> {
 			.filter((item) => item.song_id !== songId);
 		await this.ctx.storage.put("draft_reservations", reservations);
 	}
-
-	private async refreshPlaylistCatalog(playlist: RadioSong[]): Promise<RadioSong[]> {
-		if (playlist.length === 0) return playlist;
-		const lastRefresh = (await this.ctx.storage.get<number>("playlist_catalog_refreshed_at")) ?? 0;
-		if (Date.now() - lastRefresh < 60_000) return playlist;
-		try {
-			const catalog = await loadSongsByIds(this.env.DB, playlist.map((song) => song.id));
-			let changed = false;
-			const refreshed = playlist.map((song) => {
-				const stored = catalog.get(song.id);
-				if (!stored) return song;
-				if (
-					stored.title !== song.title ||
-					stored.cover_art_prompt !== song.cover_art_prompt ||
-					stored.cover_art_created_at !== song.cover_art_created_at ||
-					stored.lyrics_source !== song.lyrics_source
-				) {
-					changed = true;
-				}
-				return stored;
-			});
-			await this.ctx.storage.put("playlist_catalog_refreshed_at", Date.now());
-			if (changed) await this.ctx.storage.put("playlist", refreshed);
-			return changed ? refreshed : playlist;
-		} catch (err) {
-			console.warn("Failed to refresh radio playlist from catalog", {
-				error: err instanceof Error ? err.message : String(err),
-			});
-			await recordAppEvent(this.env, {
-				level: "warn",
-				event: "playlist_catalog_refresh_failed",
-				operation: "radio_status",
-				message: errorMessage(err),
-				details: errorDetails(err),
-			});
-			return playlist;
-		}
-	}
 }
 
 function requestFulfillment(song: RadioSong, inFlight?: RadioInFlight): FulfilledRadioRequest | undefined {
 	const requestId = song.request_id ?? inFlight?.request_id;
-	const requestText = song.request_text ?? inFlight?.request_text;
-	if (!requestId || !requestText) return undefined;
+	if (!requestId || !song.request_text) return undefined;
 	return {
 		id: requestId,
-		text: requestText,
-		created_at: inFlight?.request_created_at ?? song.created_at,
+		text: song.request_text,
+		created_at: song.created_at,
 		fulfilled_at: song.completed_at,
 		song_id: song.id,
 		song_title: song.title,
 	};
+}
+
+function fulfilledRequestsFromSongs(songs: RadioSong[]): FulfilledRadioRequest[] {
+	return songs
+		.map((song) => requestFulfillment(song))
+		.filter((request): request is FulfilledRadioRequest => Boolean(request))
+		.slice(0, RADIO_MAX_FULFILLED_REQUESTS);
+}
+
+function removeFulfilledRequests(requests: RadioRequest[], songs: RadioSong[]): RadioRequest[] {
+	if (requests.length === 0 || songs.length === 0) return requests;
+	const fulfilledRequestIds = new Set(songs.map((song) => song.request_id).filter((id): id is string => typeof id === "string"));
+	const fulfilledRequestTexts = new Set(songs.map((song) => song.request_text).filter((text): text is string => typeof text === "string"));
+	return requests.filter((request) => !fulfilledRequestIds.has(request.id) && !fulfilledRequestTexts.has(request.text));
 }
 
 function releaseOrphanedAssignments(requests: RadioRequest[], inFlight: RadioInFlight[]): RadioRequest[] {
@@ -802,31 +731,15 @@ function releaseOrphanedAssignments(requests: RadioRequest[], inFlight: RadioInF
 }
 
 function releaseRequestAssignment(requests: RadioRequest[], inFlight: RadioInFlight): RadioRequest[] {
-	if (!inFlight.request_id || !inFlight.request_text) return requests;
-	let found = false;
-	const released = requests.map((request) => {
+	if (!inFlight.request_id) return requests;
+	return requests.map((request) => {
 		if (request.id !== inFlight.request_id) return request;
-		found = true;
 		return {
 			id: request.id,
 			text: request.text,
 			created_at: request.created_at,
 		};
 	});
-	return found ? released : requeueRequest(released, inFlight);
-}
-
-function requeueRequest(requests: RadioRequest[], inFlight: RadioInFlight): RadioRequest[] {
-	if (!inFlight.request_id || !inFlight.request_text) return requests;
-	if (requests.some((request) => request.id === inFlight.request_id)) return requests;
-	return [
-		{
-			id: inFlight.request_id,
-			text: inFlight.request_text,
-			created_at: inFlight.request_created_at ?? inFlight.queued_at,
-		},
-		...requests,
-	].slice(0, RADIO_MAX_REQUESTS);
 }
 
 export default {
@@ -923,9 +836,6 @@ async function routeRequest(request: Request, env: Env, url = new URL(request.ur
 	}
 	if (url.pathname === "/api/admin/events" && request.method === "GET") {
 		return handleAppEvents(request, env);
-	}
-	if (url.pathname === "/api/admin/reconcile-metadata" && request.method === "POST") {
-		return handleMetadataReconcile(request, env);
 	}
 	if (url.pathname === "/api/library" && request.method === "GET") {
 		return handleLibrary(url, env);
@@ -1344,7 +1254,7 @@ async function handleLibrarySong(songId: string, env: Env): Promise<Response> {
 	const row = await env.DB.prepare(
 		`SELECT id, station_id, title, prompt, cover_art_object_key, cover_art_prompt, cover_art_model,
 			cover_art_created_at, request_id, request_text, lyrics, lyrics_source, music_model, text_model,
-			generation_input_json, prompt_plan_json, format, audio_object_key, metadata_object_key,
+			generation_input_json, prompt_plan_json, format, audio_object_key,
 			audio_content_type, primary_genre, genre_key, mood, energy, bpm_min, bpm_max, vocal_style,
 			created_at, completed_at, duration_ms
 		 FROM songs
@@ -1412,30 +1322,6 @@ async function handleAppEvents(request: Request, env: Env): Promise<Response> {
 		})),
 		limit,
 	});
-}
-
-async function handleMetadataReconcile(request: Request, env: Env): Promise<Response> {
-	const tokenEnv = env as Env & { ADMIN_MAINTENANCE_TOKEN?: string; COVER_BACKFILL_TOKEN?: string; OBSERVABILITY_TOKEN?: string };
-	const token = tokenEnv.ADMIN_MAINTENANCE_TOKEN ?? tokenEnv.OBSERVABILITY_TOKEN ?? tokenEnv.COVER_BACKFILL_TOKEN;
-	if (!token) return json({ error: "admin maintenance token not configured" }, 503);
-	if (request.headers.get("Authorization") !== `Bearer ${token}`) {
-		return json({ error: "unauthorized" }, 401);
-	}
-
-	const body = request.headers.get("Content-Type")?.includes("application/json")
-		? await request.json().catch(() => undefined)
-		: undefined;
-	const raw = body && typeof body === "object" ? body as { cursor?: unknown; dry_run?: unknown; limit?: unknown } : {};
-	const cursor = typeof raw.cursor === "number" && Number.isSafeInteger(raw.cursor) && raw.cursor > 0 ? raw.cursor : 0;
-	const limit = typeof raw.limit === "number" && Number.isSafeInteger(raw.limit)
-		? Math.min(75, Math.max(1, raw.limit))
-		: 25;
-	const result = await reconcileSongMetadata(env, {
-		cursor,
-		dryRun: raw.dry_run === true,
-		limit,
-	});
-	return json(result);
 }
 
 async function handleRadioAudio(request: Request, songId: string, env: Env): Promise<Response> {
@@ -1510,7 +1396,6 @@ type SongRow = {
 	prompt_plan_json: string | null;
 	format: MusicInput["format"];
 	audio_object_key: string;
-	metadata_object_key: string;
 	audio_content_type: string;
 	primary_genre: string | null;
 	genre_key: string | null;
@@ -1550,7 +1435,7 @@ async function listSongs(db: D1Database, query: LibraryQuery): Promise<{ songs: 
 		`SELECT s.id, s.station_id, s.title, s.prompt, s.cover_art_object_key, s.cover_art_prompt,
 			s.cover_art_model, s.cover_art_created_at, s.request_text, s.format, s.audio_object_key,
 			s.request_id, s.lyrics, s.lyrics_source, s.music_model, s.text_model,
-			s.generation_input_json, s.prompt_plan_json, s.metadata_object_key, s.audio_content_type,
+			s.generation_input_json, s.prompt_plan_json, s.audio_content_type,
 			s.primary_genre, s.genre_key, s.mood, s.energy, s.bpm_min, s.bpm_max, s.vocal_style,
 			s.created_at, s.completed_at, s.duration_ms
 		 FROM songs s
@@ -1568,6 +1453,19 @@ async function listSongs(db: D1Database, query: LibraryQuery): Promise<{ songs: 
 	};
 }
 
+async function loadStationPlaylist(db: D1Database, stationId: string): Promise<RadioSong[]> {
+	return (await listSongs(db, {
+		cursor: 0,
+		limit: RADIO_MAX_PLAYLIST,
+		sort: "newest",
+		station_id: stationId,
+	})).songs;
+}
+
+async function loadSongById(db: D1Database, songId: string): Promise<RadioSong | undefined> {
+	return (await loadSongsByIds(db, [songId])).get(songId);
+}
+
 async function loadSongsByIds(db: D1Database, songIds: string[]): Promise<Map<string, RadioSong>> {
 	if (songIds.length === 0) return new Map();
 	const uniqueSongIds = uniqueValues(songIds);
@@ -1579,7 +1477,7 @@ async function loadSongsByIds(db: D1Database, songIds: string[]): Promise<Map<st
 			`SELECT s.id, s.station_id, s.title, s.prompt, s.cover_art_object_key, s.cover_art_prompt,
 				s.cover_art_model, s.cover_art_created_at, s.request_text, s.format, s.audio_object_key,
 				s.request_id, s.lyrics, s.lyrics_source, s.music_model, s.text_model,
-				s.generation_input_json, s.prompt_plan_json, s.metadata_object_key, s.audio_content_type,
+				s.generation_input_json, s.prompt_plan_json, s.audio_content_type,
 				s.primary_genre, s.genre_key, s.mood, s.energy, s.bpm_min, s.bpm_max, s.vocal_style,
 				s.created_at, s.completed_at, s.duration_ms
 			 FROM songs s
@@ -1659,7 +1557,6 @@ function songFromRow(row: SongRow, tags: string[]): RadioSong {
 		prompt_plan: parseJsonRecord(row.prompt_plan_json) as RadioPromptPlan | undefined,
 		format: row.format,
 		audio_object_key: row.audio_object_key,
-		metadata_object_key: row.metadata_object_key,
 		audio_content_type: row.audio_content_type,
 		primary_genre: row.primary_genre ?? undefined,
 		genre_key: row.genre_key ?? canonicalGenreKey(row.primary_genre),
@@ -1700,12 +1597,12 @@ async function persistSongCatalog(db: D1Database, song: RadioSong): Promise<void
 		db.prepare(
 			`INSERT INTO songs (
 				id, station_id, title, prompt, cover_art_object_key, cover_art_prompt, cover_art_model,
-				cover_art_created_at, request_id, request_text, format, audio_object_key, metadata_object_key,
+				cover_art_created_at, request_id, request_text, format, audio_object_key,
 				audio_content_type, primary_genre, genre_key, mood, energy, bpm_min, bpm_max, vocal_style,
 				lyrics, lyrics_source, music_model, text_model, generation_input_json, prompt_plan_json,
 				created_at, completed_at, duration_ms
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(id) DO UPDATE SET
 				station_id = excluded.station_id,
 				title = excluded.title,
@@ -1718,7 +1615,6 @@ async function persistSongCatalog(db: D1Database, song: RadioSong): Promise<void
 				request_text = excluded.request_text,
 				format = excluded.format,
 				audio_object_key = excluded.audio_object_key,
-				metadata_object_key = excluded.metadata_object_key,
 				audio_content_type = excluded.audio_content_type,
 				primary_genre = excluded.primary_genre,
 				genre_key = excluded.genre_key,
@@ -1749,7 +1645,6 @@ async function persistSongCatalog(db: D1Database, song: RadioSong): Promise<void
 			song.request_text ?? null,
 			song.format,
 			song.audio_object_key,
-			song.metadata_object_key,
 			song.audio_content_type,
 			song.primary_genre ?? null,
 			song.genre_key ?? canonicalGenreKey(song.primary_genre) ?? null,
@@ -1818,7 +1713,7 @@ export class RadioSongWorkflow extends WorkflowEntrypoint<Env, RadioGenerateMess
 			const existingJson = await step.do(
 				`restore existing song ${message.song_id}`,
 				PERSIST_STEP_CONFIG,
-				async () => loadPersistedRadioSongJson(this.env, message),
+				async () => loadCatalogRadioSongJson(this.env, message),
 			);
 			if (existingJson) {
 				const existing = parseWorkflowRadioSong(existingJson);
@@ -1911,12 +1806,9 @@ export class RadioSongWorkflow extends WorkflowEntrypoint<Env, RadioGenerateMess
 	}
 }
 
-async function loadPersistedRadioSongJson(env: Env, message: RadioGenerateMessage): Promise<string | null> {
-	// R2 metadata is a recovery manifest for idempotent workflow replay.
-	// User-facing catalog reads should continue to hydrate from D1.
-	const existing = await env.AUDIO_BUCKET.get(radioMetadataObjectKey(message.song_id));
-	if (!existing) return null;
-	return JSON.stringify(normalizeStoredRadioSong(await existing.json<Partial<RadioSong>>(), message));
+async function loadCatalogRadioSongJson(env: Env, message: RadioGenerateMessage): Promise<string | null> {
+	const existing = await loadSongById(env.DB, message.song_id);
+	return existing ? JSON.stringify(existing) : null;
 }
 
 function parseWorkflowRadioSong(value: string): RadioSong {
@@ -2362,7 +2254,6 @@ function buildRadioSongRecord(
 		prompt_plan: draft.lyrics ? { ...draft.plan, lyrics: draft.lyrics } : draft.plan,
 		format: message.format,
 		audio_object_key: audio.audio_object_key,
-		metadata_object_key: radioMetadataObjectKey(message.song_id),
 		audio_content_type: audio.audio_content_type,
 		primary_genre: draft.plan.primary_genre,
 		genre_key: canonicalGenreKey(draft.plan.primary_genre),
@@ -2390,34 +2281,7 @@ async function generateRadioCoverArtFields(env: Env, song: RadioSong): Promise<R
 }
 
 async function completeRadioSong(env: Env, song: RadioSong): Promise<{ completed_at: number }> {
-	// Persist the R2 manifest before D1 so a retried workflow can recover
-	// generated audio/metadata and re-apply the catalog write idempotently.
 	const startedAt = Date.now();
-	try {
-		await env.AUDIO_BUCKET.put(song.metadata_object_key, JSON.stringify(song, null, 2), {
-			httpMetadata: {
-				cacheControl: "public, max-age=3600",
-				contentType: "application/json",
-			},
-		});
-	} catch (err) {
-		await recordAppEvent(env, {
-			level: "error",
-			event: "radio_metadata_persist_failed",
-			operation: "radio_persist",
-			song_id: song.id,
-			request_id: song.request_id,
-			workflow_instance_id: radioSongWorkflowInstanceId(song.id),
-			duration_ms: Date.now() - startedAt,
-			message: errorMessage(err),
-			details: {
-				title: song.title,
-				metadata_object_key: song.metadata_object_key,
-				...errorDetails(err),
-			},
-		});
-		throw err;
-	}
 	try {
 		await persistSongCatalog(env.DB, song);
 	} catch (err) {
@@ -2466,7 +2330,7 @@ async function backfillCoverArt(env: Env, limit: number, regenerate = false): Pr
 	const rows = await env.DB.prepare(
 		`SELECT id, station_id, title, prompt, cover_art_object_key, cover_art_prompt, cover_art_model,
 			cover_art_created_at, request_id, request_text, lyrics, lyrics_source, music_model, text_model,
-			generation_input_json, prompt_plan_json, format, audio_object_key, metadata_object_key,
+			generation_input_json, prompt_plan_json, format, audio_object_key,
 			audio_content_type, primary_genre, genre_key, mood, energy, bpm_min, bpm_max, vocal_style,
 			created_at, completed_at, duration_ms
 		 FROM songs
@@ -2483,16 +2347,6 @@ async function backfillCoverArt(env: Env, limit: number, regenerate = false): Pr
 		try {
 			await generateAndAttachCoverArt(env, song, regenerate);
 			await updateSongCoverArt(env.DB, song);
-			const metadata = await env.AUDIO_BUCKET.get(song.metadata_object_key);
-			if (metadata) {
-				const existing = await metadata.json<Record<string, unknown>>().catch(() => undefined);
-				await env.AUDIO_BUCKET.put(song.metadata_object_key, JSON.stringify({ ...existing, ...song }, null, 2), {
-					httpMetadata: {
-						cacheControl: "public, max-age=3600",
-						contentType: "application/json",
-					},
-				});
-			}
 			generated += song.cover_art_object_key ? 1 : 0;
 			updated.push({ id: song.id, title: song.title, cover_art_object_key: song.cover_art_object_key });
 		} catch (err) {
@@ -2513,76 +2367,6 @@ async function backfillCoverArt(env: Env, limit: number, regenerate = false): Pr
 		}
 	}
 	return { checked: songs.length, generated, songs: updated, failures };
-}
-
-async function reconcileSongMetadata(
-	env: Env,
-	options: { cursor: number; dryRun: boolean; limit: number },
-): Promise<{
-	checked: number;
-	cursor: number;
-	dry_run: boolean;
-	failures: Array<{ error: string; id: string; title: string }>;
-	has_more: boolean;
-	missing: number;
-	next_cursor: number;
-	updated: number;
-}> {
-	const rows = await env.DB.prepare(
-		`SELECT id, station_id, title, prompt, cover_art_object_key, cover_art_prompt, cover_art_model,
-			cover_art_created_at, request_id, request_text, lyrics, lyrics_source, music_model, text_model,
-			generation_input_json, prompt_plan_json, format, audio_object_key, metadata_object_key,
-			audio_content_type, primary_genre, genre_key, mood, energy, bpm_min, bpm_max, vocal_style,
-			created_at, completed_at, duration_ms
-		 FROM songs
-		 ORDER BY completed_at DESC, id DESC
-		 LIMIT ? OFFSET ?`,
-	).bind(options.limit + 1, options.cursor).all<SongRow>();
-	const batch = (rows.results ?? []).slice(0, options.limit);
-	const tags = await loadSongTags(env.DB, batch.map((row) => row.id));
-	let updated = 0;
-	let missing = 0;
-	const failures: Array<{ error: string; id: string; title: string }> = [];
-	for (const row of batch) {
-		const song = songFromRow(row, tags.get(row.id) ?? []);
-		let current: unknown;
-		try {
-			const existing = await env.AUDIO_BUCKET.get(song.metadata_object_key);
-			if (!existing) {
-				missing++;
-			} else {
-				current = await existing.json();
-			}
-		} catch (err) {
-			failures.push({ id: song.id, title: song.title, error: `metadata read failed: ${errorMessage(err)}` });
-		}
-		const currentJson = current && typeof current === "object" ? JSON.stringify(current) : "";
-		if (!currentJson || currentJson !== JSON.stringify(song)) {
-			updated++;
-			if (!options.dryRun) {
-				try {
-					await env.AUDIO_BUCKET.put(song.metadata_object_key, JSON.stringify(song, null, 2), {
-						httpMetadata: {
-							cacheControl: "no-store",
-							contentType: "application/json",
-						},
-					});
-				} catch (err) {
-					failures.push({ id: song.id, title: song.title, error: `metadata write failed: ${errorMessage(err)}` });
-				}
-			}
-		}
-	}
-	return {
-		checked: batch.length,
-		cursor: options.cursor,
-		dry_run: options.dryRun,
-		failures,
-		has_more: (rows.results ?? []).length > options.limit,
-		missing,
-		next_cursor: options.cursor + batch.length,
-		updated,
-	};
 }
 
 async function generateAndAttachCoverArt(env: Env, song: RadioSong, regenerate = false): Promise<void> {
@@ -3604,43 +3388,6 @@ function fingerprintOverlap(a: string | undefined, b: string | undefined): numbe
 		if (right.has(token)) intersection++;
 	}
 	return intersection / Math.min(left.size, right.size);
-}
-
-function normalizeStoredRadioSong(song: Partial<RadioSong>, message: RadioGenerateMessage): RadioSong {
-	const completedAt = typeof song.completed_at === "number" ? song.completed_at : Date.now();
-	return {
-		id: typeof song.id === "string" && song.id ? song.id : message.song_id,
-		station_id: typeof song.station_id === "string" && song.station_id ? song.station_id : message.station_id,
-		title: typeof song.title === "string" && song.title ? song.title : fallbackTitle(message),
-		prompt: typeof song.prompt === "string" && song.prompt ? song.prompt : fallbackRadioPrompt(message).prompt,
-		cover_art_object_key: typeof song.cover_art_object_key === "string" && song.cover_art_object_key ? song.cover_art_object_key : undefined,
-		cover_art_prompt: typeof song.cover_art_prompt === "string" && song.cover_art_prompt ? song.cover_art_prompt : undefined,
-		cover_art_model: typeof song.cover_art_model === "string" && song.cover_art_model ? song.cover_art_model : undefined,
-		cover_art_created_at: typeof song.cover_art_created_at === "number" ? song.cover_art_created_at : undefined,
-		request_id: typeof song.request_id === "string" && song.request_id ? song.request_id : message.request_id,
-		request_text: typeof song.request_text === "string" ? song.request_text : message.request_text,
-		lyrics: typeof song.lyrics === "string" && song.lyrics ? song.lyrics : undefined,
-		lyrics_source: typeof song.lyrics_source === "string" && song.lyrics_source ? song.lyrics_source : undefined,
-		music_model: typeof song.music_model === "string" && song.music_model ? song.music_model : RADIO_MUSIC_MODEL,
-		text_model: typeof song.text_model === "string" && song.text_model ? song.text_model : RADIO_TEXT_MODEL,
-		generation_input: song.generation_input && typeof song.generation_input === "object" ? song.generation_input : undefined,
-		prompt_plan: song.prompt_plan && typeof song.prompt_plan === "object" ? song.prompt_plan as RadioPromptPlan : undefined,
-		format: song.format === "wav" ? "wav" : "mp3",
-		audio_object_key: typeof song.audio_object_key === "string" && song.audio_object_key ? song.audio_object_key : radioAudioObjectKey(message.song_id, message.format),
-		metadata_object_key: typeof song.metadata_object_key === "string" && song.metadata_object_key ? song.metadata_object_key : radioMetadataObjectKey(message.song_id),
-		audio_content_type: typeof song.audio_content_type === "string" && song.audio_content_type ? song.audio_content_type : "audio/mpeg",
-		primary_genre: song.primary_genre,
-		genre_key: typeof song.genre_key === "string" && song.genre_key ? song.genre_key : canonicalGenreKey(song.primary_genre),
-		tags: normalizeTags(song.tags),
-		mood: song.mood,
-		energy: song.energy,
-		bpm_min: song.bpm_min,
-		bpm_max: song.bpm_max,
-		vocal_style: song.vocal_style,
-		created_at: typeof song.created_at === "number" ? song.created_at : message.queued_at,
-		completed_at: completedAt,
-		duration_ms: typeof song.duration_ms === "number" ? song.duration_ms : Math.max(0, completedAt - message.queued_at),
-	};
 }
 
 function fallbackRadioPrompt(message: RadioGenerateMessage): RadioPromptPlan {

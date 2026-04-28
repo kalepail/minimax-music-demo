@@ -22,7 +22,6 @@ import {
 	publicStatus,
 	genreStationId,
 	radioAudioObjectKey,
-	radioMetadataObjectKey,
 	overusedNounMatches,
 	overusedNounTerms,
 	recurringMotifs,
@@ -237,7 +236,6 @@ describe("prepareAudioBodyForStorage", () => {
 describe("radio helpers", () => {
 	it("creates stable station R2 keys", () => {
 		expect(radioAudioObjectKey("song-123", "mp3")).toBe("radio/audio/song-123.mp3");
-		expect(radioMetadataObjectKey("song-123")).toBe("radio/metadata/song-123.json");
 		expect(genreStationId("Cosmic Disco!")).toBe("genre:cosmic-disco");
 		expect(genreStationId("Experimental/Electronic")).toBe("genre:electronic-experimental");
 		expect(canonicalGenreKey("experimental electronic")).toBe("electronic experimental");
