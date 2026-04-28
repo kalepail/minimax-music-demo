@@ -4,14 +4,14 @@ A Cloudflare Worker that generates songs with the [MiniMax Music 2.6](https://de
 
 Single-song generation runs asynchronously: the Worker hands off to a Durable Object, which calls the model through an AI Gateway and copies the finished audio to R2 for one hour. The browser polls a status endpoint and streams the finished audio through the Worker.
 
-The radio station flow uses a `RadioStation` Durable Object plus Cloudflare Queues. Cron or the manual fill endpoint keeps up to 10 song generations in flight, each queue message asks one text model for a richer music prompt, asks a stronger lyric model for structured original lyrics, calls MiniMax with those lyrics, stores the finished track and metadata permanently in R2, and indexes the song in D1 for library views.
+The radio station flow uses a `RadioStation` Durable Object plus one Cloudflare Workflow instance per song. Cron or the manual fill endpoint keeps up to 10 song generations in flight, each workflow asks one text model for a richer music prompt, asks a stronger lyric model for structured original lyrics, calls MiniMax with those lyrics, stores the finished track and metadata permanently in R2, and indexes the song in D1 for library views.
 
 ## Architecture
 
 ```
 public/index.html       Single-page form + status polling
-src/index.ts            Worker routes, MusicJob DO, RadioStation DO, Queue consumer
-wrangler.jsonc          AI, DO, Queue, R2, Cron, asset bindings
+src/index.ts            Worker routes, MusicJob DO, RadioStation DO, RadioSongWorkflow
+wrangler.jsonc          AI, DO, Workflow, R2, Cron, asset bindings
 migrations/             D1 song catalog schema
 song-radio/SKILL.md     Reusable station/song-generation skill workflow
 ```
@@ -24,7 +24,7 @@ song-radio/SKILL.md     Reusable station/song-generation skill workflow
 | GET    | `/api/status/:jobId`    | Poll job state and attempt log.                    |
 | GET    | `/api/audio/:jobId`     | Stream the generated audio once `state=complete`.  |
 | GET    | `/api/radio/status`     | Current station playlist, requests, and in-flight songs. |
-| POST   | `/api/radio/request`    | Add a listener request and top up the station queue. |
+| POST   | `/api/radio/request`    | Add a listener request and top up the station backlog. |
 | POST   | `/api/radio/fill`       | Manually top up station generation to the target backlog. |
 | GET    | `/api/radio/stations`   | List saved stations and genres from the D1 catalog. |
 | GET    | `/api/radio/audio/:id`  | Stream a stored station song from R2. |
@@ -56,7 +56,7 @@ Validation follows the Cloudflare Workers AI schema for `minimax/music-2.6`:
 - A Cloudflare account with Workers AI enabled
 - An [AI Gateway](https://developers.cloudflare.com/ai-gateway/) named `default` (or update `AI_GATEWAY_ID` in `wrangler.jsonc`)
 - An R2 bucket named `minimax-music-demo-audio`
-- A Queue named `minimax-music-radio`
+- Cloudflare Workflows enabled for the account
 - A D1 database named `minimax-music-demo-catalog`
 - Node 20+ and `pnpm`
 
@@ -65,7 +65,6 @@ Validation follows the Cloudflare Workers AI schema for `minimax/music-2.6`:
 ```bash
 pnpm install
 npx wrangler r2 bucket create minimax-music-demo-audio
-npx wrangler queues create minimax-music-radio
 npx wrangler d1 create minimax-music-demo-catalog
 npx wrangler d1 migrations apply minimax-music-demo-catalog --local
 npx wrangler d1 migrations apply minimax-music-demo-catalog --remote
@@ -85,7 +84,7 @@ Bindings used (declared in `wrangler.jsonc`):
 - `AI` — Workers AI
 - `MUSIC_JOB` — Durable Object class `MusicJob`
 - `RADIO_STATION` — Durable Object class `RadioStation`
-- `RADIO_QUEUE` — Queue producer/consumer for station song jobs
+- `RADIO_SONG_WORKFLOW` — Workflow class `RadioSongWorkflow` for durable station song jobs
 - `AUDIO_BUCKET` — R2 bucket for generated audio
 - `DB` — D1 catalog for songs, tags, stations, sorting, and pagination
 - `ASSETS` — static assets from `./public/`
@@ -103,13 +102,13 @@ Bindings used (declared in `wrangler.jsonc`):
 ## Radio lifecycle
 
 - Cron runs every 5 minutes and calls `RadioStation.fill(10)` when `RADIO_AUTOFILL=true`.
-- The station DO remembers listener requests and in-flight song IDs, then enqueues one Queue message per needed song.
-- The Queue consumer uses `@cf/meta/llama-3.1-8b-instruct-fast` to expand a listener request into a rich, non-repeating MiniMax prompt.
-- A separate lyric pass uses `@cf/meta/llama-3.3-70b-instruct-fp8-fast` with JSON mode to write original MiniMax-compatible sectioned lyrics, rejects seed/UUID leakage and weak structure, then calls `minimax/music-2.6` with `lyrics_optimizer=false` and explicit lyrics. If the lyric pass fails, the station falls back to MiniMax's lyrics optimizer so the queue keeps moving.
-- Before calling MiniMax, each queue worker asks the text model to compare the draft against recent songs and in-flight drafts. The station Durable Object also reserves draft title/prompt/lyrics fingerprints so same-batch workers can reject and regenerate overlapping concepts.
-- Finished station songs are stored under `radio/audio/` in R2 and metadata under `radio/metadata/`.
+- The station DO remembers listener requests and in-flight song IDs, then starts one Workflow instance per needed song.
+- `RadioSongWorkflow` uses `@cf/meta/llama-4-scout-17b-16e-instruct` to expand a listener request into a rich, non-repeating MiniMax prompt.
+- A separate lyric pass uses `@cf/meta/llama-3.3-70b-instruct-fp8-fast` with JSON mode to write original MiniMax-compatible sectioned lyrics, rejects seed/UUID leakage and weak structure, then calls `minimax/music-2.6` with `lyrics_optimizer=false` and explicit lyrics. If the lyric pass fails, the station falls back to MiniMax's lyrics optimizer so the workflow keeps moving.
+- Before calling MiniMax, each workflow asks the text model to compare the draft against recent songs and in-flight drafts. The station Durable Object also reserves draft title/prompt/lyrics fingerprints so same-batch workflows can reject and regenerate overlapping concepts.
+- Finished station audio is stored under `radio/audio/` in R2. A copy of each song's metadata is stored under `radio/metadata/` as a workflow recovery/idempotency manifest, not as the primary query surface.
 - Generated cover art is stored under `radio/covers/` in R2. Cover generation rotates across supported Workers AI image models and uses visual-only prompts to reduce title/text artifacts.
-- Finished song metadata, including prompt plan, explicit lyrics for new radio songs, model names, creative seeds, exact generation input, and lyric source, is indexed in D1 tables `songs`, `song_tags`, and `stations`. Older songs generated through MiniMax's optimizer may only record their lyric source because that API path does not return the generated lyrics.
+- Finished song metadata, including prompt plan, explicit lyrics for new radio songs, model names, creative seeds, exact generation input, and lyric source, is indexed in D1 tables `songs`, `song_tags`, and `stations`. Treat D1 as the user-facing catalog source of truth; older songs generated through MiniMax's optimizer may only record their lyric source because that API path does not return the generated lyrics.
 - The playlist is stored in the station DO for quick live UI reads; D1 is used for library history, pagination, sorting, and genre/tag filtering.
 
 ## Library queries

@@ -22,6 +22,9 @@ import {
 	genreStationId,
 	radioAudioObjectKey,
 	radioMetadataObjectKey,
+	overusedNounMatches,
+	overusedNounTerms,
+	recurringMotifs,
 	normalizeTags,
 	storedAudioResponseHeaders,
 	storedAudioStatus,
@@ -245,6 +248,67 @@ describe("radio helpers", () => {
 		expect(parseStationParams(new URL("https://example.com/api/radio/status?station=main"))).toEqual({
 			station_id: "main",
 		});
+	});
+
+	it("surfaces recurring noun motifs across documents", () => {
+		const motifs = recurringMotifs([
+			"Cartographer of Echoes",
+			"Quiet Cartographer",
+			"The Cartographer Hour",
+			"Glass Wanderer",
+			"Wanderer's Lament",
+			"Wanderer at Dusk",
+			"Sapphire Lullaby",
+			"[Verse 1]\nThe cartographer maps the sky\n[Chorus]\nWanderer wanderer come home",
+		]);
+		const words = motifs.map((entry) => entry.word);
+		expect(words).toContain("cartographer");
+		expect(words).toContain("wanderer");
+		expect(words).not.toContain("verse");
+		expect(words).not.toContain("chorus");
+		const cartographer = motifs.find((entry) => entry.word === "cartographer");
+		const wanderer = motifs.find((entry) => entry.word === "wanderer");
+		expect(cartographer?.count).toBe(4);
+		expect(wanderer?.count).toBe(4);
+	});
+
+	it("returns no motifs when nothing recurs above the threshold", () => {
+		expect(recurringMotifs(["Solar Cathedral", "Bone Orchard", "Indigo Tide"])).toEqual([]);
+	});
+
+	it("counts each document once even when a motif repeats inside it", () => {
+		expect(recurringMotifs([
+			"Cartographer cartographer cartographer",
+			"Glass cartographer",
+		])).toEqual([]);
+	});
+
+	it("can surface motifs from combined title, prompt, and lyric context", () => {
+		const motifs = recurringMotifs([
+			"Signal Room\nCartographer synth figures over broken drums",
+			"Blue Circuit\nPercussive cartographer imagery with clipped choir",
+			"Static Orchard\n[Verse 1]\nA cartographer folds the avenue",
+		]);
+		expect(motifs.map((entry) => entry.word)).toContain("cartographer");
+	});
+
+	it("exposes the detector as overused noun terms", () => {
+		expect(overusedNounTerms([
+			"Signal cartographer",
+			"Glass cartographer",
+			"Static cartographer",
+		])).toEqual([{ word: "cartographer", count: 3 }]);
+	});
+
+	it("detects overused noun reuse while respecting explicit request text", () => {
+		const terms = [{ word: "cartographer", count: 4 }, { word: "wanderer", count: 3 }];
+		expect(overusedNounMatches("A wanderer follows the cartographer", terms).map((entry) => entry.word)).toEqual([
+			"cartographer",
+			"wanderer",
+		]);
+		expect(overusedNounMatches("A wanderer follows the cartographer", terms, { ignoreText: "cartographer ballad" }).map((entry) => entry.word)).toEqual([
+			"wanderer",
+		]);
 	});
 });
 

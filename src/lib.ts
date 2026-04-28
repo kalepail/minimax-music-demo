@@ -17,6 +17,7 @@ export type RadioInFlight = {
 	song_id: string;
 	queued_at: number;
 	creative_seed?: string;
+	workflow_instance_id?: string;
 	request_id?: string;
 	request_created_at?: number;
 	request_text?: string;
@@ -206,15 +207,21 @@ export const RADIO_MAX_REQUESTS = 50;
 export const RADIO_MAX_FULFILLED_REQUESTS = 100;
 export const RADIO_REQUEST_MAX_CHARS = 500;
 export const RADIO_IN_FLIGHT_STALE_MS = 45 * 60 * 1000;
-export const RADIO_MAX_QUEUE_ATTEMPTS = 3;
 export const RADIO_TEXT_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct";
 export const RADIO_LYRICS_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 export const RADIO_MUSIC_MODEL = "minimax/music-2.6";
 export const RADIO_COVER_MODELS = [
 	"@cf/black-forest-labs/flux-1-schnell",
 	"@cf/black-forest-labs/flux-2-klein-4b",
+	"@cf/black-forest-labs/flux-2-klein-9b",
+	"@cf/black-forest-labs/flux-2-dev",
 	"@cf/leonardo/lucid-origin",
 	"@cf/leonardo/phoenix-1.0",
+	"@cf/bytedance/stable-diffusion-xl-lightning",
+	"@cf/stabilityai/stable-diffusion-xl-base-1.0",
+	"@cf/lykon/dreamshaper-8-lcm",
+	"@cf/runwayml/stable-diffusion-v1-5-img2img",
+	"@cf/runwayml/stable-diffusion-v1-5-inpainting",
 ] as const;
 export const RADIO_COVER_MODEL = RADIO_COVER_MODELS[0];
 export const LIBRARY_MAX_LIMIT = 100;
@@ -390,6 +397,62 @@ export function normalizeBoundedInt(value: unknown, min: number, max: number): n
 	if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
 	const integer = Math.round(value);
 	return Math.min(max, Math.max(min, integer));
+}
+
+const MOTIF_STOPWORDS: ReadonlySet<string> = new Set([
+	// common english (4+ chars)
+	"about","above","across","after","again","against","along","also","another","around","because","been","before","behind","below","beneath","beside","between","beyond","both","could","does","done","down","each","either","ever","every","from","gets","gives","gone","good","have","having","here","hold","into","just","keep","know","like","look","made","make","many","more","most","much","must","near","need","never","none","once","only","other","over","past","quite","same","seem","seen","shall","since","some","such","than","that","their","them","then","there","these","they","this","those","though","through","under","until","upon","very","want","were","what","when","where","which","while","will","with","within","without","would","your","yours",
+	// section tags (also stripped, but defensive)
+	"intro","verse","verses","chorus","choruses","bridge","bridges","outro","outros","prechorus","section","sections",
+	// generic music vocabulary that is structural rather than imagery
+	"song","songs","track","tracks","music","sound","sounds","beat","beats","tempo","mood","moods","genre","genres","style","styles","vocal","vocals","instrumental","instrument","instruments","instrumentation","arrangement","arrangements","production","melody","melodies","harmony","harmonies","rhythm","rhythms","note","notes","chord","chords","scale","scales","line","lines","lyric","lyrics","hook","hooks","tone","tones","pitch","pitches","mixdown","texture","textures","timbre","timbres",
+	// radio/station scaffolding (vocabulary the system prompts themselves use)
+	"radio","station","listener","listeners","prompt","prompts","title","titles","draft","drafts","minimax","model","models","catalog","concept","concepts","seed","seeds","creative","axis","entropy","hash","hashes","fragment","fragments","internal","uniqueness","reference","field","fields","metadata","format","return","include","exclude","avoid","copyright","copyrighted","artist","artists","quote","quotes","quoted","copying","original",
+	// visual prompt scaffolding
+	"square","pictorial","image","visual","direction","focus","scene","color","lighting","character","characters","landscape","architecture","abstract","pattern","motion","blank","unmarked","surface","surfaces","purely","shape","shapes","device","devices","poster","posters","signage","label","labels","logo","logos","watermark","watermarks","letter","letters","numeral","numerals","symbol","symbols","editorial","feeling","tactile","striking","central","composition","contrast","layered","depth","handmade","detail","filled","continuous",
+]);
+
+export type OverusedNounTerm = { word: string; count: number };
+
+export function overusedNounTerms(
+	documents: ReadonlyArray<string | undefined | null>,
+	options: { minDocs?: number; max?: number } = {},
+): OverusedNounTerm[] {
+	const minDocs = options.minDocs ?? 3;
+	const max = options.max ?? 12;
+	const docCounts = new Map<string, number>();
+	for (const doc of documents) {
+		if (!doc) continue;
+		const stripped = doc.replace(/\[[^\]]+\]/g, " ").toLowerCase();
+		const tokens = new Set(stripped.match(/[a-z]{4,}/g) ?? []);
+		for (const token of tokens) {
+			if (MOTIF_STOPWORDS.has(token)) continue;
+			docCounts.set(token, (docCounts.get(token) ?? 0) + 1);
+		}
+	}
+	return [...docCounts.entries()]
+		.filter(([, count]) => count >= minDocs)
+		.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+		.slice(0, max)
+		.map(([word, count]) => ({ word, count }));
+}
+
+export function recurringMotifs(
+	documents: ReadonlyArray<string | undefined | null>,
+	options: { minDocs?: number; max?: number } = {},
+): OverusedNounTerm[] {
+	return overusedNounTerms(documents, options);
+}
+
+export function overusedNounMatches(
+	value: string | undefined | null,
+	terms: ReadonlyArray<OverusedNounTerm>,
+	options: { ignoreText?: string } = {},
+): OverusedNounTerm[] {
+	if (!value || terms.length === 0) return [];
+	const ignored = new Set((options.ignoreText?.toLowerCase().match(/[a-z]{4,}/g) ?? []));
+	const tokens = new Set(value.toLowerCase().match(/[a-z]{4,}/g) ?? []);
+	return terms.filter((term) => !ignored.has(term.word) && tokens.has(term.word));
 }
 
 export function parseLibraryQuery(url: URL): LibraryQuery | { error: string } {

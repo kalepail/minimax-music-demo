@@ -20,13 +20,13 @@ Use this shape unless the repo strongly points elsewhere:
 
 - Worker HTTP routes for station APIs and static assets.
 - Durable Object for station coordination: playlist, recent listener requests, in-flight song IDs, and fill decisions.
-- Queue for generation work. Use one queue message per song so long-running model calls can scale independently.
+- Workflow for generation work. Use one workflow instance per song so long-running multi-step jobs can retry individual phases and recover existing R2/D1 state.
 - R2 for permanent audio and metadata storage.
 - D1 for the permanent catalog: song rows, tags, stations, sort/filter fields, and pagination.
 - Cron trigger for automatic top-up, plus a manual fill endpoint for immediate batches.
-- Optional Workflow only when the generation process needs multi-step durability beyond one song job.
+- Queue only when a future change needs a lightweight handoff without multi-step durability.
 
-Avoid using a Durable Object as a high-throughput worker pool. Use it for coordination and strong consistency; use Queues for parallel generation.
+Avoid using a Durable Object as a high-throughput worker pool. Use it for coordination and strong consistency; use Workflows for parallel generation.
 
 ## Generation loop
 
@@ -34,8 +34,8 @@ When asked to keep a station filled:
 
 1. Store listener requests in the station Durable Object.
 2. On cron or manual fill, remove stale in-flight records.
-3. Enqueue enough messages to reach the target in-flight backlog, usually 10.
-4. Each queue message should:
+3. Start enough workflow instances to reach the target in-flight backlog, usually 10.
+4. Each workflow instance should:
    - Build a creative song brief from recent listener requests.
    - Run a text model to turn that brief into a compact, vivid MiniMax prompt with explicit non-repetition constraints.
    - Run a stronger lyric-writing model with JSON mode to write original, structured lyrics using MiniMax-compatible section tags, then validate that the lyrics are long enough, sectioned, unique, and free of seed/UUID leakage.
@@ -108,7 +108,7 @@ Prefer these route shapes when building a web UI:
 
 - `GET /api/radio/status` returns playlist, requests, in-flight jobs, and target backlog.
 - `POST /api/radio/request` accepts `{ "prompt": "..." }`, stores the request, and triggers fill.
-- `POST /api/radio/fill` manually tops up the station queue.
+- `POST /api/radio/fill` manually tops up the station backlog.
 - `GET /api/radio/stations` returns D1-backed stations and genre counts.
 - `GET /api/radio/audio/:songId` streams a stored R2 object with byte-range support.
 - `GET /api/radio/cover/:songId` serves generated cover art from R2.
@@ -118,11 +118,11 @@ Prefer these route shapes when building a web UI:
 
 ## Operational guardrails
 
-- Keep queue message bodies under Cloudflare Queues limits; store large data in R2 or Durable Object storage.
-- Use `max_batch_size: 1` for long song jobs, then scale with consumer concurrency.
+- Keep workflow params small and serializable; store large generated artifacts in R2 or Durable Object storage.
+- Use stable workflow instance IDs for each song and reconcile skipped `createBatch` results before reporting jobs as queued.
 - Cap concurrency deliberately. A target of 10 in-flight songs is a reasonable default for this demo.
 - Keep R2 object keys unique because concurrent writes to the same key are rate-limited.
-- Keep D1 writes idempotent. On Queue retry, recover from existing R2 metadata and upsert D1 before marking the station song complete.
+- Keep D1 writes idempotent. On Workflow retry, recover from existing R2 metadata and upsert D1 before marking the station song complete.
 - Add D1 indexes for every UI filter or sort path that will be used repeatedly.
 - Add an explicit `RADIO_AUTOFILL` flag so cron can be disabled without removing the code.
 - Run `npx wrangler types` after changing bindings.
@@ -131,7 +131,6 @@ Prefer these route shapes when building a web UI:
 
 ```sh
 npx wrangler r2 bucket create minimax-music-demo-audio
-npx wrangler queues create minimax-music-radio
 npx wrangler d1 create minimax-music-demo-catalog
 npx wrangler d1 migrations apply minimax-music-demo-catalog --local
 npx wrangler d1 migrations apply minimax-music-demo-catalog --remote

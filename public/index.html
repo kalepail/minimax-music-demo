@@ -759,43 +759,96 @@
 					nowPlayingEl.textContent = "No station tracks yet. Fill the queue to start generating.";
 				}
 
-				playlistEl.innerHTML = "";
-				for (const song of playlist.slice(0, 20)) {
-					playlistEl.append(renderSongCard(song, true));
-				}
+				reconcileList(
+					playlistEl,
+					playlist.slice(0, 20),
+					(song) => song.id,
+					(song) => renderSongCard(song, true),
+				);
 
-				requestsEl.innerHTML = "";
-				for (const request of requests.slice(0, 10)) {
-					const item = document.createElement("div");
-					item.className = "request-item";
+				renderRequestList(requestsEl, requests.slice(0, 10), "No queued requests", (node, request) => {
 					const state = request.assigned_song_id ? "generating" : "queued";
-					item.textContent = `${request.text} (${state})`;
-					requestsEl.append(item);
-				}
-				if (requests.length === 0) {
-					const item = document.createElement("div");
-					item.className = "request-item";
-					item.textContent = "No queued requests";
-					requestsEl.append(item);
-				}
+					const text = `${request.text} (${state})`;
+					if (node.textContent !== text) node.textContent = text;
+				});
 
-				fulfilledRequestsEl.innerHTML = "";
-				for (const request of fulfilledRequests.slice(0, 10)) {
-					const item = document.createElement("div");
-					item.className = "request-item";
-					item.textContent = `${request.text} -> ${request.song_title}`;
-					item.addEventListener("click", () => {
-						const song = playlist.find((entry) => entry.id === request.song_id);
-						if (song) playRadioSong(song);
-					});
-					fulfilledRequestsEl.append(item);
+				renderRequestList(
+					fulfilledRequestsEl,
+					fulfilledRequests.slice(0, 10),
+					"No fulfilled requests yet",
+					(node, request) => {
+						const text = `${request.text} -> ${request.song_title}`;
+						if (node.textContent !== text) node.textContent = text;
+						node.dataset.songId = request.song_id;
+					},
+					(node) => {
+						node.addEventListener("click", () => {
+							const list = radioStatus && Array.isArray(radioStatus.playlist) ? radioStatus.playlist : [];
+							const song = list.find((entry) => entry.id === node.dataset.songId);
+							if (song) playRadioSong(song);
+						});
+					},
+				);
+			}
+
+			function reconcileList(container, items, getKey, build, update) {
+				if (!(container._cache instanceof Map)) {
+					container.innerHTML = "";
+					container._cache = new Map();
 				}
-				if (fulfilledRequests.length === 0) {
-					const item = document.createElement("div");
-					item.className = "request-item";
-					item.textContent = "No fulfilled requests yet";
-					fulfilledRequestsEl.append(item);
+				const prevCache = container._cache;
+				const nextCache = new Map();
+				const targets = [];
+				for (const item of items) {
+					const key = getKey(item);
+					let node = prevCache.get(key);
+					if (node) {
+						if (update) update(node, item);
+					} else {
+						node = build(item);
+					}
+					nextCache.set(key, node);
+					targets.push(node);
 				}
+				for (const [key, node] of prevCache) {
+					if (!nextCache.has(key)) node.remove();
+				}
+				container._cache = nextCache;
+				let cursor = container.firstChild;
+				for (const node of targets) {
+					if (node === cursor) {
+						cursor = cursor.nextSibling;
+					} else {
+						container.insertBefore(node, cursor);
+					}
+				}
+			}
+
+			function renderRequestList(container, items, emptyText, updateNode, onCreate) {
+				if (items.length === 0) {
+					if (container._cache instanceof Map) container._cache.clear();
+					container.innerHTML = "";
+					const item = document.createElement("div");
+					item.className = "request-item placeholder";
+					item.textContent = emptyText;
+					container.append(item);
+					return;
+				}
+				const first = container.firstChild;
+				if (first && first.classList && first.classList.contains("placeholder")) first.remove();
+				reconcileList(
+					container,
+					items,
+					(request) => request.id,
+					(request) => {
+						const item = document.createElement("div");
+						item.className = "request-item";
+						updateNode(item, request);
+						if (onCreate) onCreate(item);
+						return item;
+					},
+					updateNode,
+				);
 			}
 
 			async function loadStations() {
@@ -847,14 +900,17 @@
 				libraryCursor = "0";
 				loadedLibrarySongs = [];
 				libraryEl.innerHTML = "";
+				if (libraryEl._cache instanceof Map) libraryEl._cache.clear();
 				moreLibraryButton.disabled = false;
 			}
 
 			function renderLibrary() {
-				libraryEl.innerHTML = "";
-				for (const song of loadedLibrarySongs) {
-					libraryEl.append(renderSongCard(song, true));
-				}
+				reconcileList(
+					libraryEl,
+					loadedLibrarySongs,
+					(song) => song.id,
+					(song) => renderSongCard(song, true),
+				);
 			}
 
 			function playRadioSong(song, autoplay = true) {

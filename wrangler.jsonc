@@ -8,7 +8,19 @@
 	"main": "src/index.ts",
 	"compatibility_date": "2026-04-16",
 	"observability": {
-		"enabled": true
+		"enabled": true,
+		"head_sampling_rate": 1,
+		"logs": {
+			"enabled": true,
+			"head_sampling_rate": 1,
+			"invocation_logs": true,
+			"persist": true
+		},
+		"traces": {
+			"enabled": true,
+			"head_sampling_rate": 1,
+			"persist": true
+		}
 	},
 	"upload_source_maps": true,
 	"ai": {
@@ -38,24 +50,13 @@
 	"triggers": {
 		"crons": ["*/5 * * * *"]
 	},
-	"queues": {
-		"producers": [
-			{
-				"queue": "minimax-music-radio",
-				"binding": "RADIO_QUEUE"
-			}
-		],
-		"consumers": [
-			{
-				"queue": "minimax-music-radio",
-				"max_batch_size": 1,
-				"max_batch_timeout": 5,
-				"max_retries": 2,
-				"max_concurrency": 10,
-				"dead_letter_queue": "minimax-music-radio-dlq"
-			}
-		]
-	},
+	"workflows": [
+		{
+			"name": "minimax-music-radio-song",
+			"binding": "RADIO_SONG_WORKFLOW",
+			"class_name": "RadioSongWorkflow"
+		}
+	],
 	"durable_objects": {
 		"bindings": [
 			{
