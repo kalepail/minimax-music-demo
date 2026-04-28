@@ -63,6 +63,7 @@ import {
 
 const COVER_PROMPT_PREFIX = "Square pictorial music image v4.";
 const RECENT_CONTEXT_LIMIT = 80;
+const D1_IN_CLAUSE_CHUNK_SIZE = 75;
 const PROMPT_PLAN_RESPONSE_FORMAT = {
 	type: "json_schema",
 	json_schema: {
@@ -1071,21 +1072,24 @@ async function listSongs(db: D1Database, query: LibraryQuery): Promise<{ songs: 
 
 async function loadSongsByIds(db: D1Database, songIds: string[]): Promise<Map<string, RadioSong>> {
 	if (songIds.length === 0) return new Map();
-	const placeholders = songIds.map(() => "?").join(", ");
-	const rows = await db.prepare(
-		`SELECT s.id, s.station_id, s.title, s.prompt, s.cover_art_object_key, s.cover_art_prompt,
-			s.cover_art_model, s.cover_art_created_at, s.request_text, s.format, s.audio_object_key,
-			s.request_id, s.lyrics, s.lyrics_source, s.music_model, s.text_model, s.creative_seed,
-			s.creative_axis, s.creative_bpm, s.generation_input_json, s.prompt_plan_json,
-			s.metadata_object_key, s.audio_content_type, s.primary_genre, s.mood, s.energy, s.bpm_min,
-			s.bpm_max, s.vocal_style, s.created_at, s.completed_at, s.duration_ms
-		 FROM songs s
-		 WHERE s.id IN (${placeholders})`,
-	).bind(...songIds).all<SongRow>();
-	const tags = await loadSongTags(db, songIds);
+	const uniqueSongIds = uniqueValues(songIds);
+	const tags = await loadSongTags(db, uniqueSongIds);
 	const songs = new Map<string, RadioSong>();
-	for (const row of rows.results ?? []) {
-		songs.set(row.id, songFromRow(row, tags.get(row.id) ?? []));
+	for (const batch of chunkValues(uniqueSongIds, D1_IN_CLAUSE_CHUNK_SIZE)) {
+		const placeholders = batch.map(() => "?").join(", ");
+		const rows = await db.prepare(
+			`SELECT s.id, s.station_id, s.title, s.prompt, s.cover_art_object_key, s.cover_art_prompt,
+				s.cover_art_model, s.cover_art_created_at, s.request_text, s.format, s.audio_object_key,
+				s.request_id, s.lyrics, s.lyrics_source, s.music_model, s.text_model, s.creative_seed,
+				s.creative_axis, s.creative_bpm, s.generation_input_json, s.prompt_plan_json,
+				s.metadata_object_key, s.audio_content_type, s.primary_genre, s.mood, s.energy, s.bpm_min,
+				s.bpm_max, s.vocal_style, s.created_at, s.completed_at, s.duration_ms
+			 FROM songs s
+			 WHERE s.id IN (${placeholders})`,
+		).bind(...batch).all<SongRow>();
+		for (const row of rows.results ?? []) {
+			songs.set(row.id, songFromRow(row, tags.get(row.id) ?? []));
+		}
 	}
 	return songs;
 }
@@ -1106,20 +1110,35 @@ function songOrderBy(sort: LibraryQuery["sort"]): string {
 
 async function loadSongTags(db: D1Database, songIds: string[]): Promise<Map<string, string[]>> {
 	if (songIds.length === 0) return new Map();
-	const placeholders = songIds.map(() => "?").join(", ");
-	const rows = await db.prepare(
-		`SELECT song_id, tag
-		 FROM song_tags
-		 WHERE song_id IN (${placeholders})
-		 ORDER BY tag ASC`,
-	).bind(...songIds).all<{ song_id: string; tag: string }>();
+	const uniqueSongIds = uniqueValues(songIds);
 	const tags = new Map<string, string[]>();
-	for (const row of rows.results ?? []) {
-		const list = tags.get(row.song_id) ?? [];
-		list.push(row.tag);
-		tags.set(row.song_id, list);
+	for (const batch of chunkValues(uniqueSongIds, D1_IN_CLAUSE_CHUNK_SIZE)) {
+		const placeholders = batch.map(() => "?").join(", ");
+		const rows = await db.prepare(
+			`SELECT song_id, tag
+			 FROM song_tags
+			 WHERE song_id IN (${placeholders})
+			 ORDER BY tag ASC`,
+		).bind(...batch).all<{ song_id: string; tag: string }>();
+		for (const row of rows.results ?? []) {
+			const list = tags.get(row.song_id) ?? [];
+			list.push(row.tag);
+			tags.set(row.song_id, list);
+		}
 	}
 	return tags;
+}
+
+function uniqueValues<T>(values: T[]): T[] {
+	return [...new Set(values)];
+}
+
+function chunkValues<T>(values: T[], size: number): T[][] {
+	const chunks: T[][] = [];
+	for (let i = 0; i < values.length; i += size) {
+		chunks.push(values.slice(i, i + size));
+	}
+	return chunks;
 }
 
 function songFromRow(row: SongRow, tags: string[]): RadioSong {
