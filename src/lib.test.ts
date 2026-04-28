@@ -10,6 +10,7 @@ import {
 	audioResponseHeaders,
 	canonicalGenreKey,
 	clientRateLimitKey,
+	coverImageQuality,
 	extractAudioUrl,
 	extractTextResponse,
 	isStaleRunningJob,
@@ -343,6 +344,41 @@ describe("radio helpers", () => {
 		expect(overusedNounMatches("A wanderer follows the cartographer", terms, { ignoreText: "cartographer ballad" }).map((entry) => entry.word)).toEqual([
 			"wanderer",
 		]);
+	});
+});
+
+describe("coverImageQuality", () => {
+	it("accepts large high-entropy image payloads", () => {
+		const bytes = new Uint8Array(80_000);
+		for (let i = 0; i < bytes.length; i++) bytes[i] = i % 256;
+
+		expect(coverImageQuality(bytes)).toMatchObject({
+			accepted: true,
+			byte_length: 80_000,
+		});
+	});
+
+	it("rejects tiny generated image payloads", () => {
+		const bytes = new Uint8Array(17_011);
+		for (let i = 0; i < bytes.length; i++) bytes[i] = i % 256;
+
+		expect(coverImageQuality(bytes)).toMatchObject({
+			accepted: false,
+			byte_length: 17_011,
+			reason: "image too small (17011 bytes)",
+		});
+	});
+
+	it("rejects large low-entropy image payloads", () => {
+		const bytes = new Uint8Array(80_000);
+		bytes.fill(0);
+
+		expect(coverImageQuality(bytes)).toMatchObject({
+			accepted: false,
+			byte_entropy: 0,
+			byte_length: 80_000,
+			reason: "image byte entropy too low (0.00)",
+		});
 	});
 });
 

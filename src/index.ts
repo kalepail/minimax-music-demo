@@ -29,6 +29,7 @@ import {
 	audioResponseHeaders,
 	canonicalGenreKey,
 	clientRateLimitKey,
+	coverImageQuality,
 	extractAudioUrl,
 	extractTextResponse,
 	isExpiredRateLimit,
@@ -77,7 +78,6 @@ import {
 const COVER_PROMPT_PREFIX = "Square pictorial music image v4.";
 const RECENT_CONTEXT_LIMIT = 80;
 const D1_IN_CLAUSE_CHUNK_SIZE = 75;
-const LEGACY_RADIO_STATION_METADATA_KEYS = ["playlist", "fulfilled_requests", "playlist_catalog_refreshed_at"];
 const APP_EVENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const RADIO_WORKFLOW_SUCCESS_RETENTION = "7 days";
 const RADIO_WORKFLOW_ERROR_RETENTION = "14 days";
@@ -465,7 +465,6 @@ export class MusicJob extends DurableObject<Env> {
 
 export class RadioStation extends DurableObject<Env> {
 	async status(): Promise<RadioStatus> {
-		await this.purgeLegacyCompletedSongState();
 		const [playlist, storedRequests, inFlight] = await Promise.all([
 			loadStationPlaylist(this.env.DB, RADIO_STATION_ID),
 			this.requests(),
@@ -485,7 +484,6 @@ export class RadioStation extends DurableObject<Env> {
 	}
 
 	async request(text: string, stationId = RADIO_STATION_ID, genre?: string): Promise<{ request: RadioRequest; queued: number; generation_jobs_queued: number; pending_requests: number; assigned_requests: number }> {
-		await this.purgeLegacyCompletedSongState();
 		const request: RadioRequest = {
 			id: crypto.randomUUID(),
 			text,
@@ -505,7 +503,6 @@ export class RadioStation extends DurableObject<Env> {
 	}
 
 	async fill(target = RADIO_TARGET_BACKLOG, stationId = RADIO_STATION_ID, genre?: string): Promise<number> {
-		await this.purgeLegacyCompletedSongState();
 		const now = Date.now();
 		let requests = [...(await this.requests())];
 		const existingInFlight = await this.inFlight();
@@ -617,7 +614,6 @@ export class RadioStation extends DurableObject<Env> {
 	}
 
 	async complete(song: RadioSong): Promise<void> {
-		await this.purgeLegacyCompletedSongState();
 		const existingInFlight = await this.inFlight();
 		const completedInFlight = existingInFlight.find((item) => item.song_id === song.id);
 		const inFlight = existingInFlight.filter((item) => item.song_id !== song.id);
@@ -706,10 +702,6 @@ export class RadioStation extends DurableObject<Env> {
 		const reservations = ((await this.ctx.storage.get<RadioDraftReservation[]>("draft_reservations")) ?? [])
 			.filter((item) => item.song_id !== songId);
 		await this.ctx.storage.put("draft_reservations", reservations);
-	}
-
-	private async purgeLegacyCompletedSongState(): Promise<void> {
-		await this.ctx.storage.delete(LEGACY_RADIO_STATION_METADATA_KEYS);
 	}
 }
 
@@ -852,9 +844,6 @@ async function routeRequest(request: Request, env: Env, url = new URL(request.ur
 	}
 	if (url.pathname === "/api/radio/stations" && request.method === "GET") {
 		return handleRadioStations(env);
-	}
-	if (url.pathname === "/api/radio/backfill-covers" && request.method === "POST") {
-		return handleCoverBackfill(request, env);
 	}
 	if (url.pathname === "/api/admin/events" && request.method === "GET") {
 		return handleAppEvents(request, env);
@@ -1290,31 +1279,9 @@ async function handleLibrarySong(songId: string, env: Env): Promise<Response> {
 	return json(songFromRow(row, tags.get(songId) ?? []));
 }
 
-async function handleCoverBackfill(request: Request, env: Env): Promise<Response> {
-	const token = (env as Env & { COVER_BACKFILL_TOKEN?: string }).COVER_BACKFILL_TOKEN;
-	if (!token) return json({ error: "cover backfill token not configured" }, 503);
-	if (request.headers.get("Authorization") !== `Bearer ${token}`) {
-		return json({ error: "unauthorized" }, 401);
-	}
-
-	let limit = 5;
-	let regenerate = false;
-	if (request.headers.get("Content-Type")?.includes("application/json")) {
-		const body = await request.json().catch(() => undefined);
-		if (body && typeof body === "object" && typeof (body as { limit?: unknown }).limit === "number") {
-			limit = Math.max(1, Math.min(10, Math.floor((body as { limit: number }).limit)));
-		}
-		if (body && typeof body === "object" && typeof (body as { regenerate?: unknown }).regenerate === "boolean") {
-			regenerate = (body as { regenerate: boolean }).regenerate;
-		}
-	}
-	const result = await backfillCoverArt(env, limit, regenerate);
-	return json(result, result.generated > 0 ? 202 : 200);
-}
-
 async function handleRadioInFlightCleanup(request: Request, env: Env): Promise<Response> {
-	const tokenEnv = env as Env & { ADMIN_MAINTENANCE_TOKEN?: string; COVER_BACKFILL_TOKEN?: string; OBSERVABILITY_TOKEN?: string };
-	const token = tokenEnv.ADMIN_MAINTENANCE_TOKEN ?? tokenEnv.OBSERVABILITY_TOKEN ?? tokenEnv.COVER_BACKFILL_TOKEN;
+	const tokenEnv = env as Env & { ADMIN_MAINTENANCE_TOKEN?: string; OBSERVABILITY_TOKEN?: string };
+	const token = tokenEnv.ADMIN_MAINTENANCE_TOKEN ?? tokenEnv.OBSERVABILITY_TOKEN;
 	if (!token) return json({ error: "admin maintenance token not configured" }, 503);
 	if (request.headers.get("Authorization") !== `Bearer ${token}`) {
 		return json({ error: "unauthorized" }, 401);
@@ -1332,8 +1299,8 @@ async function handleRadioInFlightCleanup(request: Request, env: Env): Promise<R
 }
 
 async function handleAppEvents(request: Request, env: Env): Promise<Response> {
-	const tokenEnv = env as Env & { COVER_BACKFILL_TOKEN?: string; OBSERVABILITY_TOKEN?: string };
-	const token = tokenEnv.OBSERVABILITY_TOKEN ?? tokenEnv.COVER_BACKFILL_TOKEN;
+	const tokenEnv = env as Env & { OBSERVABILITY_TOKEN?: string };
+	const token = tokenEnv.OBSERVABILITY_TOKEN;
 	if (!token) return json({ error: "observability token not configured" }, 503);
 	if (request.headers.get("Authorization") !== `Bearer ${token}`) {
 		return json({ error: "unauthorized" }, 401);
@@ -2366,51 +2333,8 @@ async function completeRadioSong(env: Env, song: RadioSong): Promise<{ completed
 	return { completed_at: song.completed_at };
 }
 
-async function backfillCoverArt(env: Env, limit: number, regenerate = false): Promise<{ checked: number; generated: number; songs: Array<{ id: string; title: string; cover_art_object_key?: string }>; failures: Array<{ id: string; title: string; error: string }> }> {
-	const rows = await env.DB.prepare(
-		`SELECT id, station_id, title, prompt, cover_art_object_key, cover_art_prompt, cover_art_model,
-			cover_art_created_at, request_id, request_text, lyrics, lyrics_source, music_model, text_model,
-			generation_input_json, prompt_plan_json, format, audio_object_key,
-			audio_content_type, primary_genre, genre_key, mood, energy, bpm_min, bpm_max, vocal_style,
-			created_at, completed_at, duration_ms
-		 FROM songs
-		 WHERE cover_art_object_key IS NULL OR cover_art_object_key = '' OR cover_art_prompt IS NULL OR substr(cover_art_prompt, 1, ?) != ? OR ? = 1
-		 ORDER BY completed_at DESC
-		 LIMIT ?`,
-	).bind(COVER_PROMPT_PREFIX.length, COVER_PROMPT_PREFIX, regenerate ? 1 : 0, limit).all<SongRow>();
-
-	const songs = (rows.results ?? []).map((row) => songFromRow(row, []));
-	let generated = 0;
-	const updated: Array<{ id: string; title: string; cover_art_object_key?: string }> = [];
-	const failures: Array<{ id: string; title: string; error: string }> = [];
-	for (const song of songs) {
-		try {
-			await generateAndAttachCoverArt(env, song, regenerate);
-			await updateSongCoverArt(env.DB, song);
-			generated += song.cover_art_object_key ? 1 : 0;
-			updated.push({ id: song.id, title: song.title, cover_art_object_key: song.cover_art_object_key });
-		} catch (err) {
-			const error = err instanceof Error ? err.message : String(err);
-			failures.push({ id: song.id, title: song.title, error });
-			console.warn("Cover backfill failed for song", { song_id: song.id, title: song.title, error });
-			await recordAppEvent(env, {
-				level: "error",
-				event: "cover_backfill_failed",
-				operation: "cover_backfill",
-				song_id: song.id,
-				message: error,
-				details: {
-					title: song.title,
-					...errorDetails(err),
-				},
-			});
-		}
-	}
-	return { checked: songs.length, generated, songs: updated, failures };
-}
-
-async function generateAndAttachCoverArt(env: Env, song: RadioSong, regenerate = false): Promise<void> {
-	if (song.cover_art_object_key && song.cover_art_prompt?.startsWith(COVER_PROMPT_PREFIX) && !regenerate) return;
+async function generateAndAttachCoverArt(env: Env, song: RadioSong): Promise<void> {
+	if (song.cover_art_object_key && song.cover_art_prompt?.startsWith(COVER_PROMPT_PREFIX)) return;
 	const recent = await recentSongContext(env.DB, song.station_id);
 	const overusedNouns = overusedNounsFromRecent(recent);
 	const prompt = coverArtPrompt(song, overusedNouns);
@@ -2430,6 +2354,10 @@ async function generateAndAttachCoverArt(env: Env, song: RadioSong, regenerate =
 			);
 			image = await extractImageBytes(response);
 			if (!image) throw new Error(`returned no image: ${snippet(response) ?? "empty response"}`);
+			const quality = coverImageQuality(image);
+			if (!quality.accepted) {
+				throw new Error(`rejected generated cover image: ${quality.reason}`);
+			}
 			model = candidate;
 			break;
 		} catch (err) {
@@ -2480,25 +2408,13 @@ async function generateAndAttachCoverArt(env: Env, song: RadioSong, regenerate =
 		duration_ms: Date.now() - coverStartedAt,
 		message: model === attempts[0] ? undefined : `Selected model ${attempts[0]} failed; cover generated by fallback ${model}`,
 		details: {
+			byte_entropy: Number(coverImageQuality(image).byte_entropy.toFixed(2)),
+			byte_length: image.byteLength,
 			content_type: contentType,
 			selected_model: attempts[0],
 			fallback_failures: failures,
 		},
 	});
-}
-
-async function updateSongCoverArt(db: D1Database, song: RadioSong): Promise<void> {
-	await db.prepare(
-		`UPDATE songs
-		 SET cover_art_object_key = ?, cover_art_prompt = ?, cover_art_model = ?, cover_art_created_at = ?
-		 WHERE id = ?`,
-	).bind(
-		song.cover_art_object_key ?? null,
-		song.cover_art_prompt ?? null,
-		song.cover_art_model ?? null,
-		song.cover_art_created_at ?? null,
-		song.id,
-	).run();
 }
 
 function coverArtPrompt(song: RadioSong, overusedNouns: ReadonlyArray<OverusedNounTerm> = []): string {

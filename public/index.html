@@ -1536,11 +1536,11 @@
 					tempoText(song),
 				].filter(Boolean).join(" / ") || "Not stored");
 				addDetail(grid, "Vocal style", song.vocal_style || "Not stored");
-				addDetail(grid, "Models", [
-					song.text_model ? `prompt: ${song.text_model}` : "",
-					song.music_model ? `music: ${song.music_model}` : "",
-				].filter(Boolean).join("\n") || "Older song; model names not stored.");
-				addDetail(grid, "Lyrics source", song.lyrics_source || "Older song; lyrics were not stored.");
+					addDetail(grid, "Models", [
+						song.text_model ? `prompt: ${song.text_model}` : "",
+						song.music_model ? `music: ${song.music_model}` : "",
+					].filter(Boolean).join("\n") || "Not stored.");
+					addDetail(grid, "Lyrics source", song.lyrics_source || "Not stored.");
 				container.append(grid);
 				addBlock(container, "AI-expanded music prompt", song.prompt || "Not stored");
 				addBlock(container, "Lyrics", lyricsDetail(song));
@@ -1555,8 +1555,8 @@
 				if (song.lyrics_source === "minimax-lyrics-optimizer" || song.lyrics_source === "minimax-lyrics-optimizer-fallback") {
 					return "Generated internally by MiniMax lyrics_optimizer from the AI-expanded prompt. MiniMax returns the audio URL, but not the generated lyric text.";
 				}
-				return "Not stored for this older generation.";
-			}
+					return "Not stored.";
+				}
 
 			function addDetail(parent, label, value) {
 				const field = document.createElement("div");

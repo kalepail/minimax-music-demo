@@ -29,7 +29,6 @@ song-radio/SKILL.md     Reusable station/song-generation skill workflow
 | GET    | `/api/radio/stations`   | List saved stations and genres from the D1 catalog. |
 | GET    | `/api/radio/audio/:id`  | Stream a stored station song from R2. |
 | GET    | `/api/radio/cover/:id`  | Serve generated cover art from R2. |
-| POST   | `/api/radio/backfill-covers` | Admin-only cover-art backfill for catalog songs. |
 | GET    | `/api/library`          | Paginated/sortable/filterable D1 song library. |
 | GET    | `/api/library/:id`      | Read one cataloged song with tags. |
 
@@ -109,7 +108,7 @@ Bindings used (declared in `wrangler.jsonc`):
 - Before calling MiniMax, each workflow asks `@cf/zai-org/glm-4.7-flash` to compare the draft against recent songs and in-flight drafts. The station Durable Object also keeps short-lived draft title/prompt summaries so same-batch workflows can reject and regenerate overlapping concepts.
 - Finished station audio is stored under `radio/audio/` in R2.
 - Generated cover art is stored under `radio/covers/` in R2. Cover generation rotates across supported Workers AI image models and uses visual-only prompts to reduce title/text artifacts.
-- Finished song metadata, including prompt plan, explicit lyrics for new radio songs, model names, exact generation input, and lyric source, is stored in D1 tables `songs`, `song_tags`, and `stations`. Treat D1 as the catalog source of truth; older songs generated through MiniMax's optimizer may only record their lyric source because that API path does not return the generated lyrics.
+- Finished song metadata, including prompt plan, explicit lyrics when available, model names, exact generation input, and lyric source, is stored in D1 tables `songs`, `song_tags`, and `stations`. Treat D1 as the catalog source of truth; MiniMax optimizer-generated lyrics may only record their lyric source because that API path does not return the generated lyrics.
 
 ## Library queries
 
@@ -128,8 +127,6 @@ curl -X POST "http://localhost:8787/api/radio/fill" \
   -H "Content-Type: application/json" \
   -d '{"genre":"ambient drone","target":10}'
 ```
-
-Cover backfill requires the `COVER_BACKFILL_TOKEN` Worker secret and an `Authorization: Bearer ...` header because it can spend Workers AI image-generation quota. Pass `{ "regenerate": true }` to replace existing covers, for example after changing the cover model or prompt.
 
 ## License
 
