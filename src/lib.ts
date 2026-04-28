@@ -218,8 +218,6 @@ export const RADIO_COVER_MODELS = [
 	"@cf/stabilityai/stable-diffusion-xl-base-1.0",
 ] as const;
 export const RADIO_COVER_MODEL = RADIO_COVER_MODELS[0];
-export const RADIO_COVER_MIN_IMAGE_BYTES = 40_000;
-export const RADIO_COVER_MIN_BYTE_ENTROPY = 4.5;
 export const LIBRARY_MAX_LIMIT = 100;
 export const LIBRARY_DEFAULT_LIMIT = 25;
 
@@ -446,48 +444,6 @@ export function normalizeGeneratedTitle(title: string): string {
 		.replace(/\b(\w+)\s+\1\b/gi, "$1")
 		.trim()
 		.slice(0, 120);
-}
-
-export type CoverImageQuality = {
-	accepted: boolean;
-	byte_entropy: number;
-	byte_length: number;
-	reason?: string;
-};
-
-export function coverImageQuality(bytes: Uint8Array): CoverImageQuality {
-	const byte_entropy = byteEntropy(bytes);
-	const byte_length = bytes.byteLength;
-	if (byte_length < RADIO_COVER_MIN_IMAGE_BYTES) {
-		return {
-			accepted: false,
-			byte_entropy,
-			byte_length,
-			reason: `image too small (${byte_length} bytes)`,
-		};
-	}
-	if (byte_entropy < RADIO_COVER_MIN_BYTE_ENTROPY) {
-		return {
-			accepted: false,
-			byte_entropy,
-			byte_length,
-			reason: `image byte entropy too low (${byte_entropy.toFixed(2)})`,
-		};
-	}
-	return { accepted: true, byte_entropy, byte_length };
-}
-
-function byteEntropy(bytes: Uint8Array): number {
-	if (bytes.byteLength === 0) return 0;
-	const counts = new Array<number>(256).fill(0);
-	for (const byte of bytes) counts[byte]++;
-	let entropy = 0;
-	for (const count of counts) {
-		if (count === 0) continue;
-		const probability = count / bytes.byteLength;
-		entropy -= probability * Math.log2(probability);
-	}
-	return entropy;
 }
 
 const MOTIF_STOPWORDS: ReadonlySet<string> = new Set([
