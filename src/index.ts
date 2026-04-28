@@ -61,32 +61,6 @@ import {
 
 const COVER_PROMPT_PREFIX = "Square pictorial music image v4.";
 const RECENT_CONTEXT_LIMIT = 80;
-const OVERUSED_TITLE_WORDS = [
-	"cartographer",
-	"mirage",
-	"refrain",
-	"chrome",
-	"fractured",
-	"velvet",
-	"luminous",
-	"crypt",
-	"forgotten",
-	"solar",
-	"transmission",
-	"lament",
-];
-const OVERUSED_PROMPT_PHRASES = [
-	"introduce a sense",
-	"close-mic whispered doubles",
-	"shimmering kalimba loops",
-	"warm analog haze",
-	"dusty cassette grit",
-	"wide festival gloss",
-	"rubbery fretless bass",
-	"detuned brass stabs",
-	"stuttering drum fill",
-	"prepared piano pulses",
-];
 const PROMPT_PLAN_RESPONSE_FORMAT = {
 	type: "json_schema",
 	json_schema: {
@@ -1541,12 +1515,12 @@ async function createRadioPrompt(
 	const genreLane = message.genre ? `This is for the "${message.genre}" genre radio lane. Keep it recognizably in that lane while still making it surprising.` : "";
 	const recent = await recentSongContext(env.DB, message.station_id);
 	const recentTitles = recent.map((item) => item.title).filter(Boolean);
-	const recentTitleInstruction = recentTitles.length > 0 ? `Recent titles to avoid: ${recentTitles.join(", ")}.` : "";
+	const recentTitleInstruction = recentTitles.length > 0
+		? `Recent titles to avoid and stylistically move away from:\n${recentTitles.slice(0, 40).map((title, index) => `${index + 1}. ${title}`).join("\n")}`
+		: "No recent titles are available. Invent an original title without relying on station templates.";
 	const recentPromptInstruction = recent.length > 0
 		? `Recent prompt shapes to avoid mirroring:\n${recent.slice(0, 10).map((item, index) => `${index + 1}. ${item.prompt.slice(0, 220)}`).join("\n")}`
 		: "";
-	const overuseInstruction = `Avoid the station's overused title words unless the listener explicitly requested one: ${OVERUSED_TITLE_WORDS.join(", ")}. Avoid these overused prompt phrases and close variants: ${OVERUSED_PROMPT_PHRASES.join(", ")}.`;
-	const uniqueness = uniqueSongDirective(message);
 	const seed = message.request_text
 		? `A listener requested: "${message.request_text}". Interpret it creatively without copying copyrighted lyrics or imitating a living artist exactly.`
 		: "No listener request is active. Invent a vivid left-field song concept fit for a strange internet radio station.";
@@ -1565,16 +1539,14 @@ async function createRadioPrompt(
 					role: "user",
 					content: `${seed}
 ${genreLane}
-Unique creative seed: ${message.creative_seed}
-Mandatory contrast axis: ${message.creative_axis}
+Internal uniqueness hash: ${creativeHash(message)}. Do not quote or adapt this hash.
+Creative axis: ${message.creative_axis}
 Tempo center: around ${message.creative_bpm} BPM
-Song ID entropy: ${message.song_id}
-Non-repeatable recipe for this exact song: ${uniqueness}
+Entropy is handled outside the prompt. Do not use IDs, hashes, or seed words as title material.
 ${recentTitleInstruction}
 ${recentPromptInstruction}
-${overuseInstruction}
 
-Create one surprising station-ready song concept. The final prompt must include the non-repeatable recipe as concrete musical instructions, not as a token or ID. Avoid references to specific copyrighted songs or direct artist imitation. Do not use generic titles like Echoflux, Open Frequency, Untitled Signal, or Signal Drift. Titles must be 2-5 words, pronounceable, not include UUIDs or hex fragments, and use a fresh image or action rather than a recycled proper-noun formula. Keep the prompt under 1200 characters. Add useful genre/tags/mood metadata for library filtering.`,
+Create one surprising station-ready song concept from scratch. Let the title, imagery, instrumentation, structure, and production language come from your own creative judgment, not from templates. The new title must be meaningfully unrelated to recent titles, 2-5 words, pronounceable, and must not include UUIDs, hashes, or hex fragments. The prompt must be concrete enough for a text-to-music model, but it should not mirror recent prompt phrasing, exact instrument lists, scene formulas, or title formulas. Avoid references to specific copyrighted songs or direct artist imitation. Keep the prompt under 1200 characters. Add useful genre/tags/mood metadata for library filtering.`,
 				},
 			],
 			response_format: PROMPT_PLAN_RESPONSE_FORMAT,
@@ -1592,7 +1564,7 @@ Create one surprising station-ready song concept. The final prompt must include 
 	const parsed = parsePromptPlanResponse(response);
 	if (!parsed.prompt && !parsed.title) return fallback;
 	const title = distinctRadioTitle(parsed.title || fallback.title, recentTitles, message);
-	const prompt = makePromptUnique(parsed.prompt || fallback.prompt, uniqueness, recent.map((item) => item.prompt));
+	const prompt = makePromptUnique(parsed.prompt || fallback.prompt, message, recent.map((item) => item.prompt));
 	return {
 		title,
 		prompt,
@@ -1650,7 +1622,7 @@ Mood: ${plan.mood ?? "surprising"}
 Energy: ${plan.energy ?? 7}/10
 Tempo range: ${plan.bpm_min ?? Math.max(40, message.creative_bpm - 8)}-${plan.bpm_max ?? Math.min(240, message.creative_bpm + 8)} BPM
 Vocal style: ${plan.vocal_style ?? "expressive lead vocal with memorable hook"}
-Unique arrangement constraint: ${uniqueSongDirective(message)}
+Creative axis: ${message.creative_axis}
 ${recentTitleInstruction}
 
 Write 900-1800 characters of lyrics with 20-40 non-tag lyric lines. Include at least [Verse 1], [Chorus], [Verse 2], [Bridge], and [Outro]. Put section tags on separate lines. Make the chorus memorable but not slogan-like. Keep imagery concrete, strange, and internally coherent. Make each line short enough to sing. Return only JSON.${repairInstruction}`,
@@ -1685,7 +1657,7 @@ async function ensureCatalogDistinctTitle(db: D1Database, title: string, message
 		 LIMIT 1`,
 	).bind(clean).first<{ id: string }>();
 	if (!existing) return clean;
-	return sanitizeRadioTitle(`${clean} ${titleSuffix(clean, [], message)}`) || `${clean} Signal ${message.song_id.slice(0, 4).toUpperCase()}`;
+	return fallbackTitle(message);
 }
 
 type RecentSongContext = {
@@ -1713,12 +1685,9 @@ function distinctRadioTitle(title: string, recentTitles: string[], message: Radi
 	const normalized = sanitizeRadioTitle(title) || fallbackTitle(message);
 	const lower = normalized.toLowerCase();
 	const isRecent = recentTitles.some((recent) => recent.toLowerCase() === lower);
-	const isGeneric = ["echoflux", "open frequency", "untitled signal", "signal drift"].includes(lower);
 	const isOneWord = normalized.split(/\s+/).length < 2;
-	if (!isRecent && !isGeneric && !isOneWord) return normalized.slice(0, 120);
-	const suffix = titleSuffix(normalized, recentTitles, message);
-	const expanded = `${normalized} ${suffix}`.replace(/\b(\w+)\s+\1\b/gi, "$1");
-	return expanded.slice(0, 120);
+	if (!isRecent && !isOneWord && !containsEntropyLeak(normalized)) return normalized.slice(0, 120);
+	return fallbackTitle(message);
 }
 
 function sanitizeRadioTitle(title: string): string {
@@ -1730,120 +1699,21 @@ function sanitizeRadioTitle(title: string): string {
 		.slice(0, 120);
 }
 
-function titleSuffix(title: string, recentTitles: string[], message: RadioGenerateMessage): string {
-	const titleWords = new Set(title.toLowerCase().split(/\s+/).filter(Boolean));
-	const suffixes = [
-		seedWord(message.creative_seed, 0),
-		seedWord(message.creative_seed, 1),
-		...[
-			"afterglow",
-			"parallax",
-			"voltage",
-			"mirage",
-			"overpass",
-			"lantern",
-			"cascade",
-			"velvet",
-			"satellite",
-			"bloom",
-			"cipher",
-			"harbor",
-			"fever",
-			"orbit",
-			"prism",
-			"ritual",
-		].map((value, index) => pick([value], message.song_id, index)),
-	];
-	for (const candidate of suffixes) {
-		const clean = candidate.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-		if (!clean || titleWords.has(clean)) continue;
-		const expanded = `${title} ${titleCaseWords(clean)}`.toLowerCase();
-		if (!recentTitles.some((recent) => recent.toLowerCase() === expanded)) return titleCaseWords(clean);
-	}
-	return `Signal ${message.song_id.slice(0, 4).toUpperCase()}`;
+function containsEntropyLeak(value: string): boolean {
+	return /\b[a-z]+-[a-z]+-[a-f0-9]{6,}\b/i.test(value) || /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}/i.test(value);
 }
 
-function makePromptUnique(prompt: string, uniqueness: string, recentPrompts: string[]): string {
+function makePromptUnique(prompt: string, message: RadioGenerateMessage, recentPrompts: string[]): string {
 	const normalized = normalizePromptFingerprint(prompt);
 	const mirrorsRecent = recentPrompts.some((recent) => normalizePromptFingerprint(recent) === normalized);
-	const directive = `Non-repeatable arrangement: ${uniqueness}.`;
-	const base = prompt.includes(uniqueness) ? prompt : `${prompt.trim()} ${directive}`;
+	const directive = `Creative axis: ${message.creative_axis}. Tempo center: ${message.creative_bpm} BPM.`;
+	const base = prompt.includes(message.creative_axis) ? prompt : `${prompt.trim()} ${directive}`;
 	if (!mirrorsRecent) return base.slice(0, 2000);
-	return `${directive} Avoid the previous arrangement shape entirely. ${base}`.slice(0, 2000);
+	return `${directive} Avoid the previous arrangement shape entirely and invent a new sonic premise. ${base}`.slice(0, 2000);
 }
 
 function normalizePromptFingerprint(value: string): string {
 	return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/).slice(0, 80).join(" ");
-}
-
-function uniqueSongDirective(message: RadioGenerateMessage): string {
-	const seed = `${message.song_id}:${message.creative_seed}:${message.request_text ?? ""}`;
-	const instruments = [
-		"cimbalom tremolo",
-		"muted vibraphone sparks",
-		"granular vocal pinwheels",
-		"glass marimba ostinato",
-		"bass clarinet growls",
-		"stacked vowel choir pads",
-		"tabla-like electronic drums",
-		"bowed guitar harmonics",
-		"sub-octave handclaps",
-		"modular synth bubbles",
-		"breathy unison doubles",
-		"thumb piano cross-rhythms",
-		"waterphone scrapes",
-		"nylon-string guitar ticks",
-		"clipped vocoder syllables",
-		"upright bass knocks",
-		"steel pan arpeggios",
-		"processed field-recording percussion",
-	];
-	const structures = [
-		"cold open into half-time chorus",
-		"two-bar hook that mutates every refrain",
-		"spoken pre-chorus answered by a sung hook",
-		"instrumental drop before the first verse",
-		"bridge that strips down to one percussion loop",
-		"final chorus with stacked counter-melodies",
-		"intro motif returning backwards in the outro",
-		"call-and-response hook with a rhythmic gap",
-		"false ending before a sparse last refrain",
-		"chorus melody first heard as a bass figure",
-		"two short verses separated by a wordless drop",
-		"outro that dissolves into hand percussion",
-	];
-	const textures = [
-		"rain-slick neon ambience",
-		"sunburned tape saturation",
-		"open-air stereo width",
-		"dusty basement compression",
-		"icy granular sparkle",
-		"warm valve-radio haze",
-		"dry close-up vocal intimacy",
-		"wide cinematic low-end bloom",
-		"salt-air spring reverb",
-		"soft-clipped drum bus grit",
-		"matte analog chorus",
-		"bright ceramic room reflections",
-	];
-	const hooks = [
-		"a rising three-note hook",
-		"a falling chant hook",
-		"a syncopated one-word refrain",
-		"a breathy octave leap",
-		"a clipped percussive chorus phrase",
-		"a long held note over a bass stop",
-		"a whispered pickup into a loud answer",
-		"a hook built from silence and re-entry",
-	];
-	return [
-		pick(instruments, seed, 1),
-		pick(instruments, seed, 2),
-		pick(structures, seed, 3),
-		pick(textures, seed, 4),
-		pick(hooks, seed, 5),
-		`${message.creative_bpm} BPM center`,
-	].join(", ");
 }
 
 function normalizeStoredRadioSong(song: Partial<RadioSong>, message: RadioGenerateMessage): RadioSong {
@@ -1851,7 +1721,7 @@ function normalizeStoredRadioSong(song: Partial<RadioSong>, message: RadioGenera
 	return {
 		id: typeof song.id === "string" && song.id ? song.id : message.song_id,
 		station_id: typeof song.station_id === "string" && song.station_id ? song.station_id : message.station_id,
-		title: typeof song.title === "string" && song.title ? song.title : "Untitled Signal",
+		title: typeof song.title === "string" && song.title ? song.title : fallbackTitle(message),
 		prompt: typeof song.prompt === "string" && song.prompt ? song.prompt : fallbackRadioPrompt(message).prompt,
 		cover_art_object_key: typeof song.cover_art_object_key === "string" && song.cover_art_object_key ? song.cover_art_object_key : undefined,
 		cover_art_prompt: typeof song.cover_art_prompt === "string" && song.cover_art_prompt ? song.cover_art_prompt : undefined,
@@ -1888,13 +1758,13 @@ function normalizeStoredRadioSong(song: Partial<RadioSong>, message: RadioGenera
 function fallbackRadioPrompt(message: RadioGenerateMessage): RadioPromptPlan {
 	const request = message.request_text?.trim();
 	const genre = message.genre ?? normalizeFacet(request) ?? "experimental pop";
-	const title = request ? `${titleFromRequest(request)} ${seedWord(message.creative_seed, 0)}` : fallbackTitle(message);
+	const title = request ? titleFromRequest(request) : fallbackTitle(message);
 	const seed = request
 		? `A listener requested: "${request}". Interpret it creatively without copying copyrighted lyrics or imitating a living artist exactly.`
 		: "No listener request is active. Invent a vivid left-field song concept fit for a strange internet radio station.";
 	return {
 		title,
-		prompt: `${seed} ${message.genre ? `Shape it for ${message.genre} radio.` : ""} Creative seed: ${message.creative_seed}. Contrast axis: ${message.creative_axis}. Tempo center: ${message.creative_bpm} BPM. Make a polished, original 2-3 minute song with a strong hook, clear genre fusion, specific instrumentation, vocal direction, production texture, rhythmic motion, and emotional arc. Include an ear-catching intro, a memorable chorus, a dynamic bridge, and a satisfying outro. Avoid direct artist imitation and avoid quoting existing songs.`,
+		prompt: `${seed} ${message.genre ? `Shape it for ${message.genre} radio.` : ""} Internal uniqueness hash: ${creativeHash(message)}. Do not use the hash as lyrics or title text. Contrast axis: ${message.creative_axis}. Tempo center: ${message.creative_bpm} BPM. Make a polished, original 2-3 minute song with a strong hook, clear genre fusion, specific instrumentation, vocal direction, production texture, rhythmic motion, and emotional arc. Include an ear-catching intro, a memorable chorus, a dynamic bridge, and a satisfying outro. Avoid direct artist imitation and avoid quoting existing songs.`,
 		primary_genre: genre,
 		tags: normalizeTags([genre]),
 		mood: "surprising",
@@ -1906,27 +1776,19 @@ function fallbackRadioPrompt(message: RadioGenerateMessage): RadioPromptPlan {
 }
 
 function creativeDirection(songId: string, index: number, genre?: string, request?: string): { axis: string; bpm: number; seed: string } {
-	const adjectives = ["neon", "velvet", "glass", "feral", "midnight", "solar", "chrome", "honey", "static", "opal", "paper", "thunder"];
-	const places = ["observatory", "subway", "harbor", "greenhouse", "satellite", "market", "arcade", "lighthouse", "desert", "rooftop", "warehouse", "chapel"];
-	const gestures = ["handclap ritual", "broken radio hook", "choir pad swell", "rubber bassline", "stuttering drum fill", "tape-warped bridge", "call-and-response refrain", "wordless falsetto lift"];
-	const palettes = ["warm analog haze", "icy digital shimmer", "dry close-mic intimacy", "wide festival gloss", "dusty cassette grit", "hyperclean club pressure"];
-	const axis = `${pick(adjectives, songId, index)} ${pick(places, songId, index + 3)} with ${pick(gestures, songId, index + 7)} and ${pick(palettes, songId, index + 11)}`;
+	const seedBase = `${songId}:${index}:${genre ?? ""}:${request ?? ""}`;
+	const axis = `Invent a fresh concept from scratch using opaque entropy ${hashString(`${seedBase}:axis`).toString(36)}. Do not quote this entropy.`;
 	const bpm = 72 + (hashString(`${songId}:${index}:${genre ?? ""}:${request ?? ""}`) % 84);
-	const seed = `${pick(adjectives, songId, index + 13)}-${pick(places, songId, index + 17)}-${songId.slice(0, 8)}`;
+	const seed = `r${hashString(`${seedBase}:creative-seed`).toString(36)}`;
 	return { axis, bpm, seed };
 }
 
 function fallbackTitle(message: RadioGenerateMessage): string {
-	return `${titleCaseWords(seedWord(message.creative_seed, 0))} ${titleCaseWords(seedWord(message.creative_seed, 1))}`;
+	return `Track ${creativeHash(message).slice(0, 6).toUpperCase()}`;
 }
 
-function seedWord(seed: string | undefined, index: number): string {
-	const words = (seed || "signal drift").split(/[-\s]+/).filter(Boolean);
-	return words[index % Math.max(1, words.length)] ?? "signal";
-}
-
-function pick(values: string[], seed: string, salt: number): string {
-	return values[(hashString(`${seed}:${salt}`) % values.length + values.length) % values.length];
+function creativeHash(message: RadioGenerateMessage): string {
+	return hashString(`${message.song_id}:${message.creative_seed}:${message.creative_axis}:${message.request_text ?? ""}`).toString(36);
 }
 
 function hashString(value: string): number {
@@ -1948,7 +1810,7 @@ function titleFromRequest(request: string): string {
 		.split(/\s+/)
 		.filter(Boolean)
 		.slice(0, 4);
-	return words.length > 0 ? words.map((word) => word[0]?.toUpperCase() + word.slice(1)).join(" ") : "Listener Signal";
+	return words.length > 0 ? words.map((word) => word[0]?.toUpperCase() + word.slice(1)).join(" ") : "Listener Request";
 }
 
 function parsePromptPlanResponse(response: unknown): Partial<RadioPromptPlan> & { tags: string[] } {

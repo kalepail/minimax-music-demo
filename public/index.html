@@ -859,7 +859,7 @@
 			function playRadioSong(song, autoplay = true) {
 				stationPlayer.dataset.songId = song.id;
 				stationPlayer.src = `/api/radio/audio/${song.id}?v=${song.completed_at || Date.now()}`;
-				nowPlayingEl.textContent = `Now playing: ${song.title || "Untitled Signal"}`;
+				nowPlayingEl.textContent = `Now playing: ${song.title || "Untitled Track"}`;
 				renderSongDetails(nowPlayingDetailsEl, song);
 				stationPlayer.load();
 				if (autoplay) stationPlayer.play().catch(() => {});
@@ -890,7 +890,7 @@
 				body.className = "song-body";
 				const title = document.createElement("div");
 				title.className = "song-title";
-				title.textContent = song.title || "Untitled Signal";
+				title.textContent = song.title || "Untitled Track";
 				const meta = document.createElement("div");
 				meta.className = "song-meta";
 				meta.textContent = [
@@ -933,7 +933,7 @@
 				const grid = document.createElement("div");
 				grid.className = "detail-grid";
 				addDetail(grid, "User request", song.request_text || "No listener request; station-generated.");
-				addDetail(grid, "AI title", song.title || "Untitled Signal");
+				addDetail(grid, "AI title", song.title || "Untitled Track");
 				addDetail(grid, "Genre / mood", [song.primary_genre, song.mood].filter(Boolean).join(" / ") || "Not stored");
 				addDetail(grid, "Energy / tempo", [
 					typeof song.energy === "number" ? `energy ${song.energy}` : "",
