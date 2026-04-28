@@ -38,7 +38,8 @@ When asked to keep a station filled:
 4. Each queue message should:
    - Build a creative song brief from recent listener requests.
    - Run a text model to turn that brief into a compact, vivid MiniMax prompt with explicit non-repetition constraints.
-   - Call the music model with `lyrics_optimizer=true` unless a substantially stronger lyric-writing model and QA loop are available.
+   - Run a stronger lyric-writing model with JSON mode to write original, structured lyrics using MiniMax-compatible section tags, then validate that the lyrics are long enough, sectioned, unique, and free of seed/UUID leakage.
+   - Call the music model with explicit lyrics and `lyrics_optimizer=false`. Keep `lyrics_optimizer=true` only as a fallback when the lyric-writing pass fails.
    - Stream the returned audio URL into R2.
    - Generate square cover art with a Workers AI text-to-image model and store it in R2. Rotate between supported models for variety, and keep the prompt visual-only so model attention stays on scene/color/texture instead of written language.
    - Store a small metadata JSON record in R2.
@@ -78,6 +79,26 @@ The generated prompt should avoid:
 - Requests to imitate a living artist exactly.
 - References that require the model to recreate a specific song.
 - Vague one-line concepts with no arrangement detail.
+
+## Lyric direction
+
+For lyric writing, ask for JSON with:
+
+```json
+{
+  "lyrics": "[Verse 1]\n...\n\n[Chorus]\n...",
+  "lyric_theme": "one-sentence theme",
+  "hook": "short chorus hook summary"
+}
+```
+
+The lyrics should:
+
+- Use bracketed structure tags such as `[Intro]`, `[Verse 1]`, `[Chorus]`, `[Bridge]`, and `[Outro]`.
+- Satisfy a listener request once without pasting the request as the whole lyric.
+- Avoid song IDs, UUIDs, creative seeds, catalog-only titles as headings, markdown, metadata, and direct copyrighted lyrics.
+- Be concrete, singable, and varied from recent songs.
+- Stay under MiniMax's lyric character limit.
 
 ## Station APIs
 

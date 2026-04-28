@@ -4,7 +4,7 @@ A Cloudflare Worker that generates songs with the [MiniMax Music 2.6](https://de
 
 Single-song generation runs asynchronously: the Worker hands off to a Durable Object, which calls the model through an AI Gateway and copies the finished audio to R2 for one hour. The browser polls a status endpoint and streams the finished audio through the Worker.
 
-The radio station flow uses a `RadioStation` Durable Object plus Cloudflare Queues. Cron or the manual fill endpoint keeps up to 10 song generations in flight, each queue message asks a text model for a richer music prompt, calls MiniMax, stores the finished track and metadata permanently in R2, and indexes the song in D1 for library views.
+The radio station flow uses a `RadioStation` Durable Object plus Cloudflare Queues. Cron or the manual fill endpoint keeps up to 10 song generations in flight, each queue message asks one text model for a richer music prompt, asks a stronger lyric model for structured original lyrics, calls MiniMax with those lyrics, stores the finished track and metadata permanently in R2, and indexes the song in D1 for library views.
 
 ## Architecture
 
@@ -104,10 +104,11 @@ Bindings used (declared in `wrangler.jsonc`):
 
 - Cron runs every 5 minutes and calls `RadioStation.fill(10)` when `RADIO_AUTOFILL=true`.
 - The station DO remembers listener requests and in-flight song IDs, then enqueues one Queue message per needed song.
-- The Queue consumer uses `@cf/meta/llama-3.1-8b-instruct-fast` to expand a listener request into a rich, non-repeating MiniMax prompt, then calls `minimax/music-2.6` with `lyrics_optimizer=true` so MiniMax handles lyric writing internally.
+- The Queue consumer uses `@cf/meta/llama-3.1-8b-instruct-fast` to expand a listener request into a rich, non-repeating MiniMax prompt.
+- A separate lyric pass uses `@cf/meta/llama-3.3-70b-instruct-fp8-fast` with JSON mode to write original MiniMax-compatible sectioned lyrics, rejects seed/UUID leakage and weak structure, then calls `minimax/music-2.6` with `lyrics_optimizer=false` and explicit lyrics. If the lyric pass fails, the station falls back to MiniMax's lyrics optimizer so the queue keeps moving.
 - Finished station songs are stored under `radio/audio/` in R2 and metadata under `radio/metadata/`.
 - Generated cover art is stored under `radio/covers/` in R2. Cover generation rotates across supported Workers AI image models and uses visual-only prompts to reduce title/text artifacts.
-- Finished song metadata, including prompt plan, model names, creative seeds, exact generation input, and lyric source, is indexed in D1 tables `songs`, `song_tags`, and `stations`. MiniMax-generated lyrics are not returned by the model API, so the UI records their source rather than inventing lyrics after the fact.
+- Finished song metadata, including prompt plan, explicit lyrics for new radio songs, model names, creative seeds, exact generation input, and lyric source, is indexed in D1 tables `songs`, `song_tags`, and `stations`. Older songs generated through MiniMax's optimizer may only record their lyric source because that API path does not return the generated lyrics.
 - The playlist is stored in the station DO for quick live UI reads; D1 is used for library history, pagination, sorting, and genre/tag filtering.
 
 ## Library queries

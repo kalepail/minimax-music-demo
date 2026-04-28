@@ -2,8 +2,10 @@ import { DurableObject } from "cloudflare:workers";
 import {
 	ATTEMPT_TIMEOUT_MS,
 	JOB_TTL_MS,
+	LYRICS_MAX_CHARS,
 	RATE_LIMIT_WINDOW_MS,
 	RADIO_IN_FLIGHT_STALE_MS,
+	RADIO_LYRICS_MODEL,
 	RADIO_MAX_QUEUE_ATTEMPTS,
 	RADIO_MAX_FULFILLED_REQUESTS,
 	RADIO_MAX_PLAYLIST,
@@ -101,6 +103,18 @@ const PROMPT_PLAN_RESPONSE_FORMAT = {
 			vocal_style: { type: "string" },
 		},
 		required: ["title", "prompt"],
+	},
+} as const;
+const LYRICS_RESPONSE_FORMAT = {
+	type: "json_schema",
+	json_schema: {
+		type: "object",
+		properties: {
+			lyrics: { type: "string" },
+			lyric_theme: { type: "string" },
+			hook: { type: "string" },
+		},
+		required: ["lyrics"],
 	},
 } as const;
 
@@ -1255,12 +1269,20 @@ async function generateRadioSong(message: RadioGenerateMessage, env: Env): Promi
 			return fallbackRadioPrompt(message);
 		});
 		const title = await ensureCatalogDistinctTitle(env.DB, plan.title, message);
+		const lyrics = await createRadioLyrics(plan, title, message, env).catch((err) => {
+			console.warn("Radio lyrics generation failed; falling back to MiniMax lyrics optimizer", {
+				error: err instanceof Error ? err.message : String(err),
+				song_id: message.song_id,
+			});
+			return undefined;
+		});
 		const aiInput: Record<string, unknown> = {
 			prompt: plan.prompt,
 			is_instrumental: false,
 			format: message.format,
-			lyrics_optimizer: true,
+			lyrics_optimizer: !lyrics,
 		};
+		if (lyrics) aiInput.lyrics = lyrics;
 		const result = await env.AI.run(
 			RADIO_MUSIC_MODEL,
 			aiInput,
@@ -1303,14 +1325,15 @@ async function generateRadioSong(message: RadioGenerateMessage, env: Env): Promi
 			prompt: plan.prompt,
 			request_id: message.request_id,
 			request_text: message.request_text,
-			lyrics_source: "minimax-lyrics-optimizer",
+			lyrics,
+			lyrics_source: lyrics ? "workers-ai-llama-3.3-70b" : "minimax-lyrics-optimizer-fallback",
 			music_model: RADIO_MUSIC_MODEL,
-			text_model: RADIO_TEXT_MODEL,
+			text_model: lyrics ? `${RADIO_TEXT_MODEL}; lyrics:${RADIO_LYRICS_MODEL}` : RADIO_TEXT_MODEL,
 			creative_seed: message.creative_seed,
 			creative_axis: message.creative_axis,
 			creative_bpm: message.creative_bpm,
 			generation_input: aiInput,
-			prompt_plan: plan,
+			prompt_plan: lyrics ? { ...plan, lyrics } : plan,
 			format: message.format,
 			audio_object_key: audioObjectKey,
 			metadata_object_key: metadataObjectKey,
@@ -1454,11 +1477,11 @@ function coverModelForSong(songId: string): typeof RADIO_COVER_MODELS[number] {
 }
 
 function coverModelInput(model: string, prompt: string, seed: number): Record<string, unknown> {
-	if (model === "@cf/bytedance/stable-diffusion-xl-lightning") {
+	if (model === "@cf/leonardo/lucid-origin") {
 		return {
 			prompt,
-			num_steps: 8,
-			guidance: 7,
+			steps: 8,
+			guidance: 4.5,
 			width: 1024,
 			height: 1024,
 			seed,
@@ -1540,7 +1563,7 @@ async function createRadioPrompt(
 				{
 					role: "system",
 					content:
-						"You are a music director for an always-on AI radio station. Return compact JSON only. Required string fields: title, prompt. Optional catalog fields: primary_genre, tags array, mood, energy 1-10, bpm_min, bpm_max, vocal_style. Every song must feel meaningfully different from adjacent generations. Never mirror a recent prompt's structure, exact instrument list, scene, or title pattern. Avoid fantasy-title formulas and repeated station motifs. The prompt must be original, richly musical, and suitable for a text-to-music model with internal lyric generation.",
+						"You are a music director for an always-on AI radio station. Return compact JSON only. Required string fields: title, prompt. Optional catalog fields: primary_genre, tags array, mood, energy 1-10, bpm_min, bpm_max, vocal_style. Every song must feel meaningfully different from adjacent generations. Never mirror a recent prompt's structure, exact instrument list, scene, or title pattern. Avoid fantasy-title formulas and repeated station motifs. The prompt must be original, richly musical, and suitable for a text-to-music model that will receive separately written lyrics.",
 				},
 				{
 					role: "user",
@@ -1585,6 +1608,71 @@ Create one surprising station-ready song concept. The final prompt must include 
 		bpm_max: parsed.bpm_max ?? fallback.bpm_max,
 		vocal_style: parsed.vocal_style || fallback.vocal_style,
 	};
+}
+
+type RadioLyricsPlan = {
+	lyrics?: string;
+	lyric_theme?: string;
+	hook?: string;
+};
+
+async function createRadioLyrics(
+	plan: RadioPromptPlan,
+	title: string,
+	message: RadioGenerateMessage,
+	env: Env,
+): Promise<string> {
+	const recent = await recentSongContext(env.DB, message.station_id);
+	const recentTitleInstruction = recent.length > 0
+		? `Do not quote, reuse, or closely echo these recent titles or concepts: ${recent.slice(0, 20).map((item) => item.title).join(", ")}.`
+		: "";
+	const requestInstruction = message.request_text
+		? `Listener request to satisfy once: "${message.request_text}". Transform it into a complete lyric concept; do not paste the request as the lyrics.`
+		: "No listener request is active. Invent a complete lyric concept that fits the prompt.";
+	const response = await env.AI.run(
+		RADIO_LYRICS_MODEL,
+		{
+			messages: [
+				{
+					role: "system",
+					content:
+						"You are a professional lyricist for an always-on AI radio station. Return JSON only with lyrics, lyric_theme, and hook. Write original, singable lyrics for MiniMax Music 2.6. Use bracketed section tags only, such as [Intro], [Verse 1], [Pre Chorus], [Chorus], [Bridge], [Break], [Outro]. Do not use labels like Verse: or Chorus:. Do not include markdown, commentary, chord names, metadata, artist names, song IDs, UUIDs, creative seeds, or copyrighted lyrics. Do not write the title as a heading or repeat it mechanically. Avoid generic filler and overused rhymes around night/light/fire/sky unless the concept truly needs them.",
+				},
+				{
+					role: "user",
+					content: `${requestInstruction}
+Title for catalog reference only: ${title}
+Music prompt: ${plan.prompt}
+Genre: ${plan.primary_genre ?? "open genre"}
+Tags: ${plan.tags.join(", ") || "none"}
+Mood: ${plan.mood ?? "surprising"}
+Energy: ${plan.energy ?? 7}/10
+Tempo range: ${plan.bpm_min ?? Math.max(40, message.creative_bpm - 8)}-${plan.bpm_max ?? Math.min(240, message.creative_bpm + 8)} BPM
+Vocal style: ${plan.vocal_style ?? "expressive lead vocal with memorable hook"}
+Unique arrangement constraint: ${uniqueSongDirective(message)}
+${recentTitleInstruction}
+
+Write 700-1700 characters of lyrics with 18-36 non-tag lyric lines. Include at least [Verse 1], [Chorus], [Verse 2], [Bridge], and [Outro]. Make the chorus memorable but not slogan-like. Keep imagery concrete, strange, and internally coherent. Make each line short enough to sing. Return only JSON.`,
+				},
+			],
+			response_format: LYRICS_RESPONSE_FORMAT,
+		},
+		{
+			gateway: {
+				id: env.AI_GATEWAY_ID,
+				requestTimeoutMs: 60_000,
+				retries: { maxAttempts: 1 },
+			},
+			signal: AbortSignal.timeout(60_000),
+		},
+	);
+
+	const parsed = parseLyricsResponse(response);
+	const lyrics = normalizeRadioLyrics(parsed.lyrics ?? "");
+	if (!isUsableRadioLyrics(lyrics)) {
+		throw new Error(`lyric model returned unusable lyrics: ${snippet(response) ?? "empty response"}`);
+	}
+	return lyrics;
 }
 
 async function ensureCatalogDistinctTitle(db: D1Database, title: string, message: RadioGenerateMessage): Promise<string> {
@@ -1883,6 +1971,81 @@ function parsePromptPlan(text: string): Partial<RadioPromptPlan> & { tags: strin
 		const loose = parseLoosePromptPlan(trimmed);
 		return loose.prompt || loose.title ? loose : { tags: [] };
 	}
+}
+
+function parseLyricsResponse(response: unknown): RadioLyricsPlan {
+	const objectResponse = response && typeof response === "object" ? response as Record<string, unknown> : undefined;
+	if (objectResponse) {
+		const candidate = objectResponse.response && typeof objectResponse.response === "object"
+			? objectResponse.response as Record<string, unknown>
+			: objectResponse;
+		const parsed = parseLyricsObject(candidate);
+		if (parsed.lyrics) return parsed;
+		if (typeof objectResponse.response === "string") {
+			const nested = parseLyricsText(objectResponse.response);
+			if (nested.lyrics) return nested;
+		}
+	}
+	const text = extractTextResponse(response);
+	return text ? parseLyricsText(text) : {};
+}
+
+function parseLyricsText(text: string): RadioLyricsPlan {
+	const trimmed = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+	try {
+		const parsed = JSON.parse(trimmed) as unknown;
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+			? parseLyricsObject(parsed as Record<string, unknown>)
+			: {};
+	} catch {
+		const loose = parseLyricsObject({
+			lyrics: looseStringField(trimmed, "lyrics", ["lyric_theme", "hook"]),
+			lyric_theme: looseStringField(trimmed, "lyric_theme", ["hook"]),
+			hook: looseStringField(trimmed, "hook", []),
+		});
+		if (loose.lyrics) return loose;
+		return /\[(?:verse|chorus|intro|bridge|outro|hook|pre chorus|break)\b/i.test(trimmed)
+			? { lyrics: trimmed }
+			: {};
+	}
+}
+
+function parseLyricsObject(parsed: Record<string, unknown>): RadioLyricsPlan {
+	return {
+		lyrics: typeof parsed.lyrics === "string" ? parsed.lyrics.trim() : undefined,
+		lyric_theme: typeof parsed.lyric_theme === "string" ? parsed.lyric_theme.trim().slice(0, 240) : undefined,
+		hook: typeof parsed.hook === "string" ? parsed.hook.trim().slice(0, 240) : undefined,
+	};
+}
+
+function normalizeRadioLyrics(value: string): string {
+	let lyrics = value
+		.trim()
+		.replace(/^```(?:lyrics|text|json)?\s*/i, "")
+		.replace(/\s*```$/i, "")
+		.replace(/\r\n?/g, "\n")
+		.replace(/\\n/g, "\n")
+		.replace(/^\s*(Intro|Verse(?:\s+\d+)?|Pre[- ]?Chorus|Chorus|Hook|Bridge|Break|Outro)\s*:\s*(.+)$/gim, "[$1]\n$2")
+		.replace(/^\s*(Intro|Verse(?:\s+\d+)?|Pre[- ]?Chorus|Chorus|Hook|Bridge|Break|Outro)\s*:\s*$/gim, "[$1]")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
+	if (lyrics.length <= LYRICS_MAX_CHARS) return lyrics;
+	const clipped = lyrics.slice(0, LYRICS_MAX_CHARS);
+	const lastBreak = clipped.lastIndexOf("\n");
+	lyrics = (lastBreak > 300 ? clipped.slice(0, lastBreak) : clipped).trim();
+	return lyrics;
+}
+
+function isUsableRadioLyrics(lyrics: string): boolean {
+	if (lyrics.length < 300 || lyrics.length > LYRICS_MAX_CHARS) return false;
+	if (!/\[Verse(?:\s+\d+)?\]/i.test(lyrics) || !/\[Chorus\]/i.test(lyrics)) return false;
+	if (/\b[a-z]+-[a-z]+-[a-f0-9]{6,}\b/i.test(lyrics)) return false;
+	if (/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}/i.test(lyrics)) return false;
+	if (/^\s*(Verse|Chorus|Bridge|Outro)\s*:/im.test(lyrics)) return false;
+	const lyricLines = lyrics.split("\n").map((line) => line.trim()).filter((line) => line && !/^\[[^\]]+\]$/.test(line));
+	if (lyricLines.length < 10) return false;
+	const uniqueLines = new Set(lyricLines.map((line) => line.toLowerCase()));
+	return uniqueLines.size >= Math.ceil(lyricLines.length * 0.55);
 }
 
 function parsePromptPlanObject(parsed: Record<string, unknown>): Partial<RadioPromptPlan> & { tags: string[] } {

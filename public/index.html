@@ -961,7 +961,7 @@
 
 			function lyricsDetail(song) {
 				if (song.lyrics) return song.lyrics;
-				if (song.lyrics_source === "minimax-lyrics-optimizer") {
+				if (song.lyrics_source === "minimax-lyrics-optimizer" || song.lyrics_source === "minimax-lyrics-optimizer-fallback") {
 					return "Generated internally by MiniMax lyrics_optimizer from the AI-expanded prompt. MiniMax returns the audio URL, but not the generated lyric text.";
 				}
 				return "Not stored for this older generation.";
