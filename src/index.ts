@@ -48,6 +48,8 @@ import {
 	type LibraryQuery,
 	type MusicInput,
 	type RateLimitRecord,
+	type RadioDraftReservation,
+	type RadioDraftReservationResult,
 	type RadioGenerateMessage,
 	type FulfilledRadioRequest,
 	type RadioInFlight,
@@ -89,6 +91,29 @@ const LYRICS_RESPONSE_FORMAT = {
 			hook: { type: "string" },
 		},
 		required: ["lyrics"],
+	},
+} as const;
+const SIMILARITY_RESPONSE_FORMAT = {
+	type: "json_schema",
+	json_schema: {
+		type: "object",
+		properties: {
+			too_similar: { type: "boolean" },
+			reason: { type: "string" },
+			repair_guidance: { type: "string" },
+			nearest_title: { type: "string" },
+		},
+		required: ["too_similar"],
+	},
+} as const;
+const TITLE_RESPONSE_FORMAT = {
+	type: "json_schema",
+	json_schema: {
+		type: "object",
+		properties: {
+			title: { type: "string" },
+		},
+		required: ["title"],
 	},
 } as const;
 
@@ -410,7 +435,28 @@ export class RadioStation extends DurableObject<Env> {
 			this.ctx.storage.put("in_flight", inFlight),
 			this.ctx.storage.put("requests", nextRequests),
 			this.ctx.storage.put("fulfilled_requests", nextFulfilled),
+			this.removeDraftReservation(song.id),
 		]);
+	}
+
+	async draftReservations(): Promise<RadioDraftReservation[]> {
+		return await this.pruneDraftReservations();
+	}
+
+	async reserveDraft(draft: RadioDraftReservation): Promise<RadioDraftReservationResult> {
+		const reservations = (await this.pruneDraftReservations()).filter((item) => item.song_id !== draft.song_id);
+		const conflict = reservations.find((item) => draftReservationConflicts(draft, item));
+		if (conflict) {
+			return {
+				accepted: false,
+				conflict_song_id: conflict.song_id,
+				reason: `draft overlaps in-flight song "${conflict.title}"`,
+				reservations,
+			};
+		}
+		const next = [draft, ...reservations].slice(0, RADIO_TARGET_BACKLOG * 3);
+		await this.ctx.storage.put("draft_reservations", next);
+		return { accepted: true, reservations: next };
 	}
 
 	async noteFailure(songId: string, error: string): Promise<void> {
@@ -429,6 +475,7 @@ export class RadioStation extends DurableObject<Env> {
 			this.ctx.storage.put("in_flight", inFlight),
 			this.ctx.storage.put("requests", requests),
 			this.noteFailure(songId, error),
+			this.removeDraftReservation(songId),
 		]);
 	}
 
@@ -481,6 +528,20 @@ export class RadioStation extends DurableObject<Env> {
 
 	private async inFlight(): Promise<RadioInFlight[]> {
 		return (await this.ctx.storage.get<RadioInFlight[]>("in_flight")) ?? [];
+	}
+
+	private async pruneDraftReservations(): Promise<RadioDraftReservation[]> {
+		const now = Date.now();
+		const reservations = ((await this.ctx.storage.get<RadioDraftReservation[]>("draft_reservations")) ?? [])
+			.filter((item) => now - item.created_at < RADIO_IN_FLIGHT_STALE_MS);
+		await this.ctx.storage.put("draft_reservations", reservations);
+		return reservations;
+	}
+
+	private async removeDraftReservation(songId: string): Promise<void> {
+		const reservations = ((await this.ctx.storage.get<RadioDraftReservation[]>("draft_reservations")) ?? [])
+			.filter((item) => item.song_id !== songId);
+		await this.ctx.storage.put("draft_reservations", reservations);
 	}
 
 	private async refreshPlaylistCatalog(playlist: RadioSong[]): Promise<RadioSong[]> {
@@ -1235,21 +1296,60 @@ async function generateRadioSong(message: RadioGenerateMessage, env: Env): Promi
 			return;
 		}
 
-		const plan = await createRadioPrompt(message, env).catch((err) => {
-			console.warn("Radio prompt expansion failed; using fallback prompt", {
-				error: err instanceof Error ? err.message : String(err),
-				song_id: message.song_id,
+		let draftReservations = await station.draftReservations();
+		let repairGuidance: string | undefined;
+		let plan: RadioPromptPlan | undefined;
+		let title: string | undefined;
+		let lyrics: string | undefined;
+		for (let attempt = 0; attempt < 2; attempt++) {
+			plan = await createRadioPrompt(message, env, draftReservations, repairGuidance).catch((err) => {
+				console.warn("Radio prompt expansion failed; using fallback prompt", {
+					error: err instanceof Error ? err.message : String(err),
+					song_id: message.song_id,
+				});
+				return fallbackRadioPrompt(message);
 			});
-			return fallbackRadioPrompt(message);
-		});
-		const title = await ensureCatalogDistinctTitle(env.DB, plan.title, message);
-		const lyrics = await createRadioLyrics(plan, title, message, env).catch((err) => {
-			console.warn("Radio lyrics generation failed; falling back to MiniMax lyrics optimizer", {
-				error: err instanceof Error ? err.message : String(err),
-				song_id: message.song_id,
+			title = await ensureCatalogDistinctTitle(env.DB, plan.title, message);
+			if (isFallbackTitle(title)) {
+				const repairedTitle = await repairRadioTitle(plan, message, env, draftReservations).catch((err) => {
+					console.warn("Radio title repair failed; using fallback title", {
+						error: err instanceof Error ? err.message : String(err),
+						song_id: message.song_id,
+					});
+					return title ?? fallbackTitle(message);
+				});
+				title = await ensureCatalogDistinctTitle(env.DB, repairedTitle, message);
+			}
+			lyrics = await createRadioLyrics(plan, title, message, env, draftReservations).catch((err) => {
+				console.warn("Radio lyrics generation failed; falling back to MiniMax lyrics optimizer", {
+					error: err instanceof Error ? err.message : String(err),
+					song_id: message.song_id,
+				});
+				return undefined;
 			});
-			return undefined;
-		});
+			const similarity = await reviewDraftSimilarity({ title, prompt: plan.prompt, lyrics }, message, env, draftReservations).catch((err) => {
+				console.warn("Radio similarity review failed; using reservation checks only", {
+					error: err instanceof Error ? err.message : String(err),
+					song_id: message.song_id,
+				});
+				return { too_similar: false } satisfies SimilarityReview;
+			});
+			if (similarity.too_similar && attempt === 0) {
+				repairGuidance = similarity.repair_guidance || similarity.reason || "Make the title, lyrical premise, arrangement, and production language less similar to recent or in-flight songs.";
+				draftReservations = await station.draftReservations();
+				continue;
+			}
+			const reservation = radioDraftReservation(message.song_id, title, plan.prompt, lyrics, message.request_text);
+			const reserved = await station.reserveDraft(reservation);
+			if (reserved.accepted) break;
+			if (attempt === 0) {
+				repairGuidance = reserved.reason || "Move away from in-flight drafts created by this fill.";
+				draftReservations = reserved.reservations;
+				continue;
+			}
+			throw new Error(reserved.reason || "Could not reserve a unique radio draft");
+		}
+		if (!plan || !title) throw new Error("Radio draft planning did not produce a song plan");
 		const aiInput: Record<string, unknown> = {
 			prompt: plan.prompt,
 			is_instrumental: false,
@@ -1511,6 +1611,8 @@ function base64ToBytes(value: string): Uint8Array {
 async function createRadioPrompt(
 	message: RadioGenerateMessage,
 	env: Env,
+	draftReservations: RadioDraftReservation[] = [],
+	repairGuidance?: string,
 ): Promise<RadioPromptPlan> {
 	const genreLane = message.genre ? `This is for the "${message.genre}" genre radio lane. Keep it recognizably in that lane while still making it surprising.` : "";
 	const recent = await recentSongContext(env.DB, message.station_id);
@@ -1521,6 +1623,10 @@ async function createRadioPrompt(
 	const recentPromptInstruction = recent.length > 0
 		? `Recent prompt shapes to avoid mirroring:\n${recent.slice(0, 10).map((item, index) => `${index + 1}. ${item.prompt.slice(0, 220)}`).join("\n")}`
 		: "";
+	const draftInstruction = draftReservations.length > 0
+		? `In-flight drafts from this fill that this song must not overlap:\n${draftReservations.slice(0, 12).map((item, index) => `${index + 1}. ${item.title}: ${item.prompt.slice(0, 220)}`).join("\n")}`
+		: "";
+	const repairInstruction = repairGuidance ? `Regeneration guidance from the similarity reviewer: ${repairGuidance}` : "";
 	const seed = message.request_text
 		? `A listener requested: "${message.request_text}". Interpret it creatively without copying copyrighted lyrics or imitating a living artist exactly.`
 		: "No listener request is active. Invent a vivid left-field song concept fit for a strange internet radio station.";
@@ -1545,6 +1651,8 @@ Tempo center: around ${message.creative_bpm} BPM
 Entropy is handled outside the prompt. Do not use IDs, hashes, or seed words as title material.
 ${recentTitleInstruction}
 ${recentPromptInstruction}
+${draftInstruction}
+${repairInstruction}
 
 Create one surprising station-ready song concept from scratch. Let the title, imagery, instrumentation, structure, and production language come from your own creative judgment, not from templates. The new title must be meaningfully unrelated to recent titles, 2-5 words, pronounceable, and must not include UUIDs, hashes, or hex fragments. The prompt must be concrete enough for a text-to-music model, but it should not mirror recent prompt phrasing, exact instrument lists, scene formulas, or title formulas. Avoid references to specific copyrighted songs or direct artist imitation. Keep the prompt under 1200 characters. Add useful genre/tags/mood metadata for library filtering.`,
 				},
@@ -1589,10 +1697,14 @@ async function createRadioLyrics(
 	title: string,
 	message: RadioGenerateMessage,
 	env: Env,
+	draftReservations: RadioDraftReservation[] = [],
 ): Promise<string> {
 	const recent = await recentSongContext(env.DB, message.station_id);
 	const recentTitleInstruction = recent.length > 0
 		? `Do not quote, reuse, or closely echo these recent titles or concepts: ${recent.slice(0, 20).map((item) => item.title).join(", ")}.`
+		: "";
+	const draftLyricInstruction = draftReservations.length > 0
+		? `Also avoid lyrical premises implied by these in-flight drafts: ${draftReservations.slice(0, 12).map((item) => item.title).join(", ")}.`
 		: "";
 	const requestInstruction = message.request_text
 		? `Listener request to satisfy once: "${message.request_text}". Transform it into a complete lyric concept; do not paste the request as the lyrics.`
@@ -1624,6 +1736,7 @@ Tempo range: ${plan.bpm_min ?? Math.max(40, message.creative_bpm - 8)}-${plan.bp
 Vocal style: ${plan.vocal_style ?? "expressive lead vocal with memorable hook"}
 Creative axis: ${message.creative_axis}
 ${recentTitleInstruction}
+${draftLyricInstruction}
 
 Write 900-1800 characters of lyrics with 20-40 non-tag lyric lines. Include at least [Verse 1], [Chorus], [Verse 2], [Bridge], and [Outro]. Put section tags on separate lines. Make the chorus memorable but not slogan-like. Keep imagery concrete, strange, and internally coherent. Make each line short enough to sing. Return only JSON.${repairInstruction}`,
 					},
@@ -1648,6 +1761,129 @@ Write 900-1800 characters of lyrics with 20-40 non-tag lyric lines. Include at l
 	throw new Error(`lyric model returned unusable lyrics: ${lastSnippet ?? "empty response"}`);
 }
 
+type SimilarityReview = {
+	too_similar: boolean;
+	reason?: string;
+	repair_guidance?: string;
+	nearest_title?: string;
+};
+
+async function reviewDraftSimilarity(
+	draft: { title: string; prompt: string; lyrics?: string },
+	message: RadioGenerateMessage,
+	env: Env,
+	draftReservations: RadioDraftReservation[],
+): Promise<SimilarityReview> {
+	const recent = await recentSongContext(env.DB, message.station_id);
+	const comparable = [
+		...draftReservations.slice(0, 12).map((item) => ({
+			title: item.title,
+			prompt: item.prompt,
+			lyrics: undefined,
+			source: "in-flight draft",
+		})),
+		...recent.slice(0, 16).map((item) => ({
+			title: item.title,
+			prompt: item.prompt,
+			lyrics: item.lyrics,
+			source: "recent song",
+		})),
+	];
+	if (comparable.length === 0) return { too_similar: false };
+
+	const response = await env.AI.run(
+		RADIO_TEXT_MODEL,
+		{
+			messages: [
+				{
+					role: "system",
+					content:
+						"You are a strict radio programming editor. Return JSON only. Decide whether a candidate AI radio song is too similar to recent or in-flight songs. Mark too_similar=true only when a listener would reasonably feel the same premise, title pattern, lyrical imagery, arrangement shape, or production concept is being repeated. Do not penalize broad genre continuity by itself.",
+				},
+				{
+					role: "user",
+					content: `Candidate:
+Title: ${draft.title}
+Prompt: ${draft.prompt}
+Lyrics excerpt: ${(draft.lyrics ?? "").slice(0, 900) || "not available"}
+
+Compare against:
+${comparable.map((item, index) => `${index + 1}. (${item.source}) ${item.title}
+Prompt: ${item.prompt.slice(0, 450)}
+Lyrics excerpt: ${(item.lyrics ?? "").slice(0, 450) || "not available"}`).join("\n\n")}
+
+Return JSON with too_similar, reason, nearest_title, and repair_guidance. If too_similar is true, repair_guidance should tell the next prompt attempt how to move away without using a hard-coded replacement idea.`,
+				},
+			],
+			response_format: SIMILARITY_RESPONSE_FORMAT,
+		},
+		{
+			gateway: {
+				id: env.AI_GATEWAY_ID,
+				requestTimeoutMs: 30_000,
+				retries: { maxAttempts: 1 },
+			},
+			signal: AbortSignal.timeout(30_000),
+		},
+	);
+	return parseSimilarityReview(response);
+}
+
+async function repairRadioTitle(
+	plan: RadioPromptPlan,
+	message: RadioGenerateMessage,
+	env: Env,
+	draftReservations: RadioDraftReservation[],
+): Promise<string> {
+	const recent = await recentSongContext(env.DB, message.station_id);
+	const response = await env.AI.run(
+		RADIO_TEXT_MODEL,
+		{
+			messages: [
+				{
+					role: "system",
+					content:
+						"You name songs for an AI radio station. Return JSON only with a title. Write an original 2-5 word title that fits the candidate prompt but does not reuse recent or in-flight title patterns. Do not include hashes, IDs, UUIDs, subtitles, punctuation-heavy formatting, artist names, or commentary.",
+				},
+				{
+					role: "user",
+					content: `Candidate prompt:
+${plan.prompt}
+
+Listener request: ${message.request_text ?? "none"}
+
+Recent titles:
+${recent.slice(0, 40).map((item, index) => `${index + 1}. ${item.title}`).join("\n") || "none"}
+
+In-flight titles:
+${draftReservations.slice(0, 12).map((item, index) => `${index + 1}. ${item.title}`).join("\n") || "none"}
+
+Create one fresh catalog title.`,
+				},
+			],
+			response_format: TITLE_RESPONSE_FORMAT,
+		},
+		{
+			gateway: {
+				id: env.AI_GATEWAY_ID,
+				requestTimeoutMs: 30_000,
+				retries: { maxAttempts: 1 },
+			},
+			signal: AbortSignal.timeout(30_000),
+		},
+	);
+	const responseObject = response && typeof response === "object" ? response as Record<string, unknown> : undefined;
+	const parsed = responseObject?.response && typeof responseObject.response === "object"
+		? responseObject.response as Record<string, unknown>
+		: responseObject;
+	const rawTitle = typeof parsed?.title === "string"
+		? parsed.title
+		: looseStringField(extractTextResponse(response) ?? "", "title", []);
+	const title = sanitizeRadioTitle(rawTitle ?? "");
+	if (!title || title.split(/\s+/).length < 2 || containsEntropyLeak(title)) return fallbackTitle(message);
+	return title;
+}
+
 async function ensureCatalogDistinctTitle(db: D1Database, title: string, message: RadioGenerateMessage): Promise<string> {
 	const clean = sanitizeRadioTitle(title) || fallbackTitle(message);
 	const existing = await db.prepare(
@@ -1663,20 +1899,22 @@ async function ensureCatalogDistinctTitle(db: D1Database, title: string, message
 type RecentSongContext = {
 	title: string;
 	prompt: string;
+	lyrics?: string;
 	cover_art_prompt?: string;
 };
 
 async function recentSongContext(db: D1Database, stationId: string): Promise<RecentSongContext[]> {
 	const rows = await db.prepare(
-		`SELECT title, prompt, cover_art_prompt
+		`SELECT title, prompt, lyrics, cover_art_prompt
 		 FROM songs
 		 WHERE station_id = ?
 		 ORDER BY completed_at DESC
 		 LIMIT ?`,
-	).bind(stationId, RECENT_CONTEXT_LIMIT).all<{ title: string; prompt: string; cover_art_prompt: string | null }>();
+	).bind(stationId, RECENT_CONTEXT_LIMIT).all<{ title: string; prompt: string; lyrics: string | null; cover_art_prompt: string | null }>();
 	return (rows.results ?? []).map((row) => ({
 		title: row.title,
 		prompt: row.prompt,
+		lyrics: row.lyrics ?? undefined,
 		cover_art_prompt: row.cover_art_prompt ?? undefined,
 	})).filter((row) => row.title || row.prompt);
 }
@@ -1703,6 +1941,26 @@ function containsEntropyLeak(value: string): boolean {
 	return /\b[a-z]+-[a-z]+-[a-f0-9]{6,}\b/i.test(value) || /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}/i.test(value);
 }
 
+function radioDraftReservation(songId: string, title: string, prompt: string, lyrics: string | undefined, requestText: string | undefined): RadioDraftReservation {
+	return {
+		song_id: songId,
+		title,
+		prompt,
+		prompt_fingerprint: contentFingerprint(prompt),
+		lyrics_fingerprint: lyrics ? contentFingerprint(lyrics) : undefined,
+		request_text: requestText,
+		created_at: Date.now(),
+	};
+}
+
+function draftReservationConflicts(a: RadioDraftReservation, b: RadioDraftReservation): boolean {
+	if (a.title.trim().toLowerCase() === b.title.trim().toLowerCase()) return true;
+	if (a.prompt_fingerprint && b.prompt_fingerprint && a.prompt_fingerprint === b.prompt_fingerprint) return true;
+	if (a.lyrics_fingerprint && b.lyrics_fingerprint && a.lyrics_fingerprint === b.lyrics_fingerprint) return true;
+	return fingerprintOverlap(a.prompt_fingerprint, b.prompt_fingerprint) >= 0.72 ||
+		(a.lyrics_fingerprint && b.lyrics_fingerprint ? fingerprintOverlap(a.lyrics_fingerprint, b.lyrics_fingerprint) >= 0.72 : false);
+}
+
 function makePromptUnique(prompt: string, message: RadioGenerateMessage, recentPrompts: string[]): string {
 	const normalized = normalizePromptFingerprint(prompt);
 	const mirrorsRecent = recentPrompts.some((recent) => normalizePromptFingerprint(recent) === normalized);
@@ -1714,6 +1972,31 @@ function makePromptUnique(prompt: string, message: RadioGenerateMessage, recentP
 
 function normalizePromptFingerprint(value: string): string {
 	return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/).slice(0, 80).join(" ");
+}
+
+function contentFingerprint(value: string): string {
+	const counts = new Map<string, number>();
+	for (const token of value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/)) {
+		if (token.length < 4 || /^\d+$/.test(token)) continue;
+		counts.set(token, (counts.get(token) ?? 0) + 1);
+	}
+	return [...counts.entries()]
+		.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+		.slice(0, 80)
+		.map(([token]) => token)
+		.join(" ");
+}
+
+function fingerprintOverlap(a: string | undefined, b: string | undefined): number {
+	if (!a || !b) return 0;
+	const left = new Set(a.split(/\s+/).filter(Boolean));
+	const right = new Set(b.split(/\s+/).filter(Boolean));
+	if (left.size === 0 || right.size === 0) return 0;
+	let intersection = 0;
+	for (const token of left) {
+		if (right.has(token)) intersection++;
+	}
+	return intersection / Math.min(left.size, right.size);
 }
 
 function normalizeStoredRadioSong(song: Partial<RadioSong>, message: RadioGenerateMessage): RadioSong {
@@ -1787,6 +2070,10 @@ function fallbackTitle(message: RadioGenerateMessage): string {
 	return `Track ${creativeHash(message).slice(0, 6).toUpperCase()}`;
 }
 
+function isFallbackTitle(title: string): boolean {
+	return /^Track [A-Z0-9]{4,}$/i.test(title);
+}
+
 function creativeHash(message: RadioGenerateMessage): string {
 	return hashString(`${message.song_id}:${message.creative_seed}:${message.creative_axis}:${message.request_text ?? ""}`).toString(36);
 }
@@ -1851,6 +2138,44 @@ function parseLyricsResponse(response: unknown): RadioLyricsPlan {
 	}
 	const text = extractTextResponse(response);
 	return text ? parseLyricsText(text) : {};
+}
+
+function parseSimilarityReview(response: unknown): SimilarityReview {
+	const objectResponse = response && typeof response === "object" ? response as Record<string, unknown> : undefined;
+	if (objectResponse) {
+		const candidate = objectResponse.response && typeof objectResponse.response === "object"
+			? objectResponse.response as Record<string, unknown>
+			: objectResponse;
+		const parsed = parseSimilarityObject(candidate);
+		if (typeof parsed.too_similar === "boolean") return parsed;
+		if (typeof objectResponse.response === "string") return parseSimilarityText(objectResponse.response);
+	}
+	const text = extractTextResponse(response);
+	return text ? parseSimilarityText(text) : { too_similar: false };
+}
+
+function parseSimilarityText(text: string): SimilarityReview {
+	const trimmed = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+	try {
+		const parsed = JSON.parse(trimmed) as unknown;
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+			? parseSimilarityObject(parsed as Record<string, unknown>)
+			: { too_similar: false };
+	} catch {
+		return {
+			too_similar: /"too_similar"\s*:\s*true/i.test(trimmed) || /\btoo similar\b/i.test(trimmed),
+			reason: trimmed.slice(0, 300),
+		};
+	}
+}
+
+function parseSimilarityObject(parsed: Record<string, unknown>): SimilarityReview {
+	return {
+		too_similar: parsed.too_similar === true,
+		reason: typeof parsed.reason === "string" ? parsed.reason.trim().slice(0, 300) : undefined,
+		repair_guidance: typeof parsed.repair_guidance === "string" ? parsed.repair_guidance.trim().slice(0, 500) : undefined,
+		nearest_title: typeof parsed.nearest_title === "string" ? parsed.nearest_title.trim().slice(0, 160) : undefined,
+	};
 }
 
 function parseLyricsText(text: string): RadioLyricsPlan {

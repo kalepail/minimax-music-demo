@@ -28,6 +28,23 @@ export type FulfilledRadioRequest = RadioRequest & {
 	song_title: string;
 };
 
+export type RadioDraftReservation = {
+	song_id: string;
+	title: string;
+	prompt: string;
+	prompt_fingerprint: string;
+	lyrics_fingerprint?: string;
+	request_text?: string;
+	created_at: number;
+};
+
+export type RadioDraftReservationResult = {
+	accepted: boolean;
+	reservations: RadioDraftReservation[];
+	reason?: string;
+	conflict_song_id?: string;
+};
+
 export type RadioSong = {
 	id: string;
 	station_id: string;
