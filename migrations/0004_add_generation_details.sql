@@ -2,8 +2,5 @@ ALTER TABLE songs ADD COLUMN lyrics TEXT;
 ALTER TABLE songs ADD COLUMN lyrics_source TEXT;
 ALTER TABLE songs ADD COLUMN music_model TEXT;
 ALTER TABLE songs ADD COLUMN text_model TEXT;
-ALTER TABLE songs ADD COLUMN creative_seed TEXT;
-ALTER TABLE songs ADD COLUMN creative_axis TEXT;
-ALTER TABLE songs ADD COLUMN creative_bpm INTEGER;
 ALTER TABLE songs ADD COLUMN generation_input_json TEXT;
 ALTER TABLE songs ADD COLUMN prompt_plan_json TEXT;

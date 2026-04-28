@@ -6,7 +6,6 @@ CREATE TABLE IF NOT EXISTS songs (
 	request_text TEXT,
 	format TEXT NOT NULL,
 	audio_object_key TEXT NOT NULL,
-	metadata_object_key TEXT NOT NULL,
 	audio_content_type TEXT NOT NULL,
 	primary_genre TEXT,
 	mood TEXT,
@@ -44,4 +43,3 @@ CREATE TABLE IF NOT EXISTS stations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_stations_genre ON stations (genre_filter);
-
