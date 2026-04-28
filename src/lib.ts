@@ -194,7 +194,9 @@ export const RADIO_LYRICS_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 export const RADIO_MUSIC_MODEL = "minimax/music-2.6";
 export const RADIO_COVER_MODELS = [
 	"@cf/black-forest-labs/flux-1-schnell",
+	"@cf/black-forest-labs/flux-2-klein-4b",
 	"@cf/leonardo/lucid-origin",
+	"@cf/leonardo/phoenix-1.0",
 ] as const;
 export const RADIO_COVER_MODEL = RADIO_COVER_MODELS[0];
 export const LIBRARY_MAX_LIMIT = 100;

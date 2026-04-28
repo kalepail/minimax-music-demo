@@ -1477,21 +1477,17 @@ function coverModelForSong(songId: string): typeof RADIO_COVER_MODELS[number] {
 }
 
 function coverModelInput(model: string, prompt: string, seed: number): Record<string, unknown> {
-	if (model === "@cf/leonardo/lucid-origin") {
-		return {
-			prompt,
-			steps: 8,
-			guidance: 4.5,
-			width: 1024,
-			height: 1024,
-			seed,
-		};
+	switch (model) {
+		case "@cf/leonardo/lucid-origin":
+			return { prompt, steps: 8, guidance: 4.5, width: 1024, height: 1024, seed };
+		case "@cf/leonardo/phoenix-1.0":
+			return { prompt, num_steps: 12, guidance: 4, width: 1024, height: 1024, seed };
+		case "@cf/black-forest-labs/flux-2-klein-4b":
+			return { prompt, steps: 6, width: 1024, height: 1024, seed };
+		case "@cf/black-forest-labs/flux-1-schnell":
+		default:
+			return { prompt, steps: 4, seed };
 	}
-	return {
-		prompt,
-		steps: 4,
-		seed,
-	};
 }
 
 async function extractImageBytes(value: unknown): Promise<Uint8Array | undefined> {
