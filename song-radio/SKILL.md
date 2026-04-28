@@ -37,9 +37,10 @@ When asked to keep a station filled:
 3. Start enough workflow instances to reach the target in-flight backlog, usually 10.
 4. Each workflow instance should:
    - Build a creative song brief from recent listener requests.
-   - Run a text model to turn that brief into a compact, vivid MiniMax prompt with explicit non-repetition constraints.
-   - Run a fast structured-output lyric-writing model to write original, structured lyrics using MiniMax-compatible section tags, then validate that the lyrics are long enough, sectioned, unique, and free of seed/UUID leakage.
-   - Compare the draft against recent songs and in-flight draft reservations before spending the music call. If the draft overlaps, regenerate once with reviewer guidance.
+   - Treat every model call as stateless. Pass only the data that call needs, and separate instructions from input data with clear sections.
+   - Run a text model to turn the listener request plus recent catalog context into a compact, vivid MiniMax prompt with explicit non-repetition constraints.
+   - Run a fast structured-output lyric-writing model to write original, structured lyrics using only the prompt plan, listener request, and bounded avoid lists, then validate that the lyrics are long enough, sectioned, unique, and free of technical-token leakage.
+   - Compare the draft against recent songs and in-flight draft reservations in a dedicated review call before spending the music call. If the draft overlaps, regenerate once with reviewer guidance.
    - Reserve accepted draft fingerprints in the station Durable Object so same-batch workers can avoid each other's titles, prompts, and lyrics.
    - Call the music model with explicit lyrics and `lyrics_optimizer=false`. Keep `lyrics_optimizer=true` only as a fallback when the lyric-writing pass fails.
    - Stream the returned audio URL into R2.
@@ -98,7 +99,7 @@ The lyrics should:
 
 - Use bracketed structure tags such as `[Intro]`, `[Verse 1]`, `[Chorus]`, `[Bridge]`, and `[Outro]`.
 - Satisfy a listener request once without pasting the request as the whole lyric.
-- Avoid song IDs, UUIDs, creative seeds, catalog-only titles as headings, markdown, metadata, and direct copyrighted lyrics.
+- Avoid song IDs, UUIDs, technical tokens, catalog-only titles as headings, markdown, metadata, and direct copyrighted lyrics.
 - Be concrete, singable, and varied from recent songs.
 - Stay under MiniMax's lyric character limit.
 

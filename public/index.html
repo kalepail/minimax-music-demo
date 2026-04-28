@@ -1540,17 +1540,12 @@
 					song.text_model ? `prompt: ${song.text_model}` : "",
 					song.music_model ? `music: ${song.music_model}` : "",
 				].filter(Boolean).join("\n") || "Older song; model names not stored.");
-				addDetail(grid, "Creative seed", [
-					song.creative_seed,
-					song.creative_axis,
-					typeof song.creative_bpm === "number" ? `${song.creative_bpm} BPM seed` : "",
-				].filter(Boolean).join("\n") || "Not stored");
 				addDetail(grid, "Lyrics source", song.lyrics_source || "Older song; lyrics were not stored.");
 				container.append(grid);
 				addBlock(container, "AI-expanded music prompt", song.prompt || "Not stored");
 				addBlock(container, "Lyrics", lyricsDetail(song));
 				if (song.generation_input) {
-					addBlock(container, "Exact MiniMax input", JSON.stringify(song.generation_input, null, 2));
+					addBlock(container, "MiniMax input", JSON.stringify(song.generation_input, null, 2));
 				}
 				if (song.cover_art_prompt) addBlock(container, "Cover prompt", song.cover_art_prompt);
 			}
@@ -1588,7 +1583,6 @@
 
 			function tempoText(song) {
 				if (typeof song.bpm_min === "number" && typeof song.bpm_max === "number") return `${song.bpm_min}-${song.bpm_max} BPM`;
-				if (typeof song.creative_bpm === "number") return `${song.creative_bpm} BPM`;
 				return "";
 			}
 

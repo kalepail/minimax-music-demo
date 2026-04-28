@@ -95,7 +95,7 @@ Bindings used (declared in `wrangler.jsonc`):
 
 - One synchronous attempt per job, with a 13-minute model timeout to leave room for R2 persistence under the Durable Object alarm wall-time limit.
 - A watchdog alarm marks interrupted running jobs as failed after the attempt timeout plus a short grace period.
-- Frontend polls every 3 seconds for up to 15 minutes, with the job ID persisted in the URL hash and local storage so a refresh reconnects to the same job.
+- Frontend polls every 3 seconds for up to 15 minutes, with the job ID persisted in the URL fragment and local storage so a refresh reconnects to the same job.
 - Job records live in Durable Object storage for one hour, then are removed by a cleanup alarm.
 - Finished audio is copied to R2, served through `/api/audio/:jobId` with byte-range support, and deleted when the job record expires.
 
@@ -103,12 +103,13 @@ Bindings used (declared in `wrangler.jsonc`):
 
 - Cron runs every 5 minutes and calls `RadioStation.fill(10)` when `RADIO_AUTOFILL=true`.
 - The station DO remembers listener requests and in-flight song IDs, then starts one Workflow instance per needed song.
-- `RadioSongWorkflow` uses `@cf/meta/llama-4-scout-17b-16e-instruct` to expand a listener request into a rich, non-repeating MiniMax prompt.
-- A separate lyric pass uses `@cf/zai-org/glm-4.7-flash` with structured JSON output to write original MiniMax-compatible sectioned lyrics, with `@cf/moonshotai/kimi-k2.5` as a higher-cost fallback when the primary lyric pass fails or is rejected. The workflow rejects seed/UUID leakage and weak structure, then calls `minimax/music-2.6` with `lyrics_optimizer=false` and explicit lyrics. If both lyric passes fail, the station falls back to MiniMax's lyrics optimizer so the workflow keeps moving.
+- Each model call is treated as a stateless, isolated task. Durable state from prior steps is passed explicitly as bounded input data: listener request, recent catalog context, in-flight drafts, generated prompt plan, lyrics, and catalog metadata.
+- `RadioSongWorkflow` uses `@cf/meta/llama-4-scout-17b-16e-instruct` to expand a listener request into a rich, non-repeating MiniMax prompt. The prompt-planning call does not assume model memory; it receives the relevant recent titles, prompt shapes, and metadata for that one call.
+- A separate lyric pass uses `@cf/zai-org/glm-4.7-flash` with structured JSON output to write original MiniMax-compatible sectioned lyrics, with `@cf/moonshotai/kimi-k2.5` as a higher-cost fallback when the primary lyric pass fails or is rejected. The workflow rejects technical-token leakage and weak structure, then calls `minimax/music-2.6` with `lyrics_optimizer=false` and explicit lyrics. If both lyric passes fail, the station falls back to MiniMax's lyrics optimizer so the workflow keeps moving.
 - Before calling MiniMax, each workflow asks `@cf/zai-org/glm-4.7-flash` to compare the draft against recent songs and in-flight drafts. The station Durable Object also reserves draft title/prompt/lyrics fingerprints so same-batch workflows can reject and regenerate overlapping concepts.
 - Finished station audio is stored under `radio/audio/` in R2. A copy of each song's metadata is stored under `radio/metadata/` as a workflow recovery/idempotency manifest, not as the primary query surface.
 - Generated cover art is stored under `radio/covers/` in R2. Cover generation rotates across supported Workers AI image models and uses visual-only prompts to reduce title/text artifacts.
-- Finished song metadata, including prompt plan, explicit lyrics for new radio songs, model names, creative seeds, exact generation input, and lyric source, is indexed in D1 tables `songs`, `song_tags`, and `stations`. Treat D1 as the user-facing catalog source of truth; older songs generated through MiniMax's optimizer may only record their lyric source because that API path does not return the generated lyrics.
+- Finished song metadata, including prompt plan, explicit lyrics for new radio songs, model names, exact generation input, and lyric source, is indexed in D1 tables `songs`, `song_tags`, and `stations`. Treat D1 as the user-facing catalog source of truth; older songs generated through MiniMax's optimizer may only record their lyric source because that API path does not return the generated lyrics.
 - The playlist is stored in the station DO for quick live UI reads; D1 is used for library history, pagination, sorting, and genre/tag filtering.
 
 ## Library queries

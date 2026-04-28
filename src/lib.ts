@@ -16,7 +16,6 @@ export type RadioRequest = {
 export type RadioInFlight = {
 	song_id: string;
 	queued_at: number;
-	creative_seed?: string;
 	workflow_instance_id?: string;
 	request_id?: string;
 	request_created_at?: number;
@@ -61,9 +60,6 @@ export type RadioSong = {
 	lyrics_source?: string;
 	music_model?: string;
 	text_model?: string;
-	creative_seed?: string;
-	creative_axis?: string;
-	creative_bpm?: number;
 	generation_input?: Record<string, unknown>;
 	prompt_plan?: RadioPromptPlan;
 	format: MusicInput["format"];
@@ -121,9 +117,6 @@ export type RadioGenerateMessage = {
 	request_created_at?: number;
 	request_text?: string;
 	genre?: string;
-	creative_seed: string;
-	creative_axis: string;
-	creative_bpm: number;
 	queued_at: number;
 };
 
@@ -470,7 +463,7 @@ const MOTIF_STOPWORDS: ReadonlySet<string> = new Set([
 	// generic music vocabulary that is structural rather than imagery
 	"song","songs","track","tracks","music","sound","sounds","beat","beats","tempo","mood","moods","genre","genres","style","styles","vocal","vocals","instrumental","instrument","instruments","instrumentation","arrangement","arrangements","production","melody","melodies","harmony","harmonies","rhythm","rhythms","note","notes","chord","chords","scale","scales","line","lines","lyric","lyrics","hook","hooks","tone","tones","pitch","pitches","mixdown","texture","textures","timbre","timbres",
 	// radio/station scaffolding (vocabulary the system prompts themselves use)
-	"radio","station","listener","listeners","prompt","prompts","title","titles","draft","drafts","minimax","model","models","catalog","concept","concepts","seed","seeds","creative","axis","entropy","hash","hashes","fragment","fragments","internal","uniqueness","reference","field","fields","metadata","format","return","include","exclude","avoid","copyright","copyrighted","artist","artists","quote","quotes","quoted","copying","original",
+	"radio","station","listener","listeners","prompt","prompts","title","titles","draft","drafts","minimax","model","models","catalog","concept","concepts","creative","reference","field","fields","metadata","format","return","include","exclude","avoid","copyright","copyrighted","artist","artists","quote","quotes","quoted","copying","original",
 	// visual prompt scaffolding
 	"square","pictorial","image","visual","direction","focus","scene","color","lighting","character","characters","landscape","architecture","abstract","pattern","motion","blank","unmarked","surface","surfaces","purely","shape","shapes","device","devices","poster","posters","signage","label","labels","logo","logos","watermark","watermarks","letter","letters","numeral","numerals","symbol","symbols","editorial","feeling","tactile","striking","central","composition","contrast","layered","depth","handmade","detail","filled","continuous",
 ]);
