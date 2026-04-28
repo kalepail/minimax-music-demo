@@ -668,6 +668,19 @@ export class RadioStation extends DurableObject<Env> {
 		]);
 	}
 
+	async clearInFlight(songIds?: string[]): Promise<{ before: number; cleared: number; remaining: number }> {
+		const existingInFlight = await this.inFlight();
+		const clearAll = !songIds || songIds.length === 0;
+		const ids = new Set(songIds);
+		const inFlight = clearAll ? [] : existingInFlight.filter((item) => !ids.has(item.song_id));
+		const cleared = existingInFlight.length - inFlight.length;
+		if (cleared > 0) await this.ctx.storage.put("in_flight", inFlight);
+		for (const item of existingInFlight) {
+			if (clearAll || ids.has(item.song_id)) await this.removeDraftReservation(item.song_id);
+		}
+		return { before: existingInFlight.length, cleared, remaining: inFlight.length };
+	}
+
 	private async requests(): Promise<RadioRequest[]> {
 		return (await this.ctx.storage.get<RadioRequest[]>("requests")) ?? [];
 	}
@@ -836,6 +849,9 @@ async function routeRequest(request: Request, env: Env, url = new URL(request.ur
 	}
 	if (url.pathname === "/api/admin/events" && request.method === "GET") {
 		return handleAppEvents(request, env);
+	}
+	if (url.pathname === "/api/admin/radio/in-flight" && request.method === "DELETE") {
+		return handleRadioInFlightCleanup(request, env);
 	}
 	if (url.pathname === "/api/library" && request.method === "GET") {
 		return handleLibrary(url, env);
@@ -1285,6 +1301,25 @@ async function handleCoverBackfill(request: Request, env: Env): Promise<Response
 	}
 	const result = await backfillCoverArt(env, limit, regenerate);
 	return json(result, result.generated > 0 ? 202 : 200);
+}
+
+async function handleRadioInFlightCleanup(request: Request, env: Env): Promise<Response> {
+	const tokenEnv = env as Env & { ADMIN_MAINTENANCE_TOKEN?: string; COVER_BACKFILL_TOKEN?: string; OBSERVABILITY_TOKEN?: string };
+	const token = tokenEnv.ADMIN_MAINTENANCE_TOKEN ?? tokenEnv.OBSERVABILITY_TOKEN ?? tokenEnv.COVER_BACKFILL_TOKEN;
+	if (!token) return json({ error: "admin maintenance token not configured" }, 503);
+	if (request.headers.get("Authorization") !== `Bearer ${token}`) {
+		return json({ error: "unauthorized" }, 401);
+	}
+	const body = request.headers.get("Content-Type")?.includes("application/json")
+		? await request.json().catch(() => undefined)
+		: undefined;
+	const raw = body && typeof body === "object" ? body as { song_ids?: unknown; station_id?: unknown } : {};
+	const songIds = Array.isArray(raw.song_ids)
+		? raw.song_ids.filter((id): id is string => typeof id === "string" && id.length > 0)
+		: undefined;
+	const stationId = typeof raw.station_id === "string" && raw.station_id ? raw.station_id : RADIO_STATION_ID;
+	const result = await radioStation(env, stationId).clearInFlight(songIds);
+	return json({ station_id: stationId, ...result });
 }
 
 async function handleAppEvents(request: Request, env: Env): Promise<Response> {
@@ -2175,10 +2210,6 @@ async function generateAndPersistRadioAudio(message: RadioGenerateMessage, env: 
 				cacheControl: "public, max-age=3600",
 				contentType,
 			},
-			customMetadata: {
-				station: message.station_id,
-				title: draft.title,
-			},
 		});
 	} catch (err) {
 		await recordAppEvent(env, {
@@ -2425,10 +2456,6 @@ async function generateAndAttachCoverArt(env: Env, song: RadioSong, regenerate =
 		httpMetadata: {
 			cacheControl: "public, max-age=86400",
 			contentType,
-		},
-		customMetadata: {
-			model,
-			song_id: song.id,
 		},
 	});
 	song.cover_art_object_key = key;
