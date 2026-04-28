@@ -58,7 +58,33 @@ import {
 } from "./lib";
 
 const COVER_PROMPT_PREFIX = "Square pictorial music image v4.";
-const RECENT_CONTEXT_LIMIT = 30;
+const RECENT_CONTEXT_LIMIT = 80;
+const OVERUSED_TITLE_WORDS = [
+	"cartographer",
+	"mirage",
+	"refrain",
+	"chrome",
+	"fractured",
+	"velvet",
+	"luminous",
+	"crypt",
+	"forgotten",
+	"solar",
+	"transmission",
+	"lament",
+];
+const OVERUSED_PROMPT_PHRASES = [
+	"introduce a sense",
+	"close-mic whispered doubles",
+	"shimmering kalimba loops",
+	"warm analog haze",
+	"dusty cassette grit",
+	"wide festival gloss",
+	"rubbery fretless bass",
+	"detuned brass stabs",
+	"stuttering drum fill",
+	"prepared piano pulses",
+];
 const PROMPT_PLAN_RESPONSE_FORMAT = {
 	type: "json_schema",
 	json_schema: {
@@ -1228,6 +1254,7 @@ async function generateRadioSong(message: RadioGenerateMessage, env: Env): Promi
 			});
 			return fallbackRadioPrompt(message);
 		});
+		const title = await ensureCatalogDistinctTitle(env.DB, plan.title, message);
 		const aiInput: Record<string, unknown> = {
 			prompt: plan.prompt,
 			is_instrumental: false,
@@ -1272,7 +1299,7 @@ async function generateRadioSong(message: RadioGenerateMessage, env: Env): Promi
 		const song: RadioSong = {
 			id: message.song_id,
 			station_id: message.station_id,
-			title: plan.title,
+			title,
 			prompt: plan.prompt,
 			request_id: message.request_id,
 			request_text: message.request_text,
@@ -1499,6 +1526,7 @@ async function createRadioPrompt(
 	const recentPromptInstruction = recent.length > 0
 		? `Recent prompt shapes to avoid mirroring:\n${recent.slice(0, 10).map((item, index) => `${index + 1}. ${item.prompt.slice(0, 220)}`).join("\n")}`
 		: "";
+	const overuseInstruction = `Avoid the station's overused title words unless the listener explicitly requested one: ${OVERUSED_TITLE_WORDS.join(", ")}. Avoid these overused prompt phrases and close variants: ${OVERUSED_PROMPT_PHRASES.join(", ")}.`;
 	const uniqueness = uniqueSongDirective(message);
 	const seed = message.request_text
 		? `A listener requested: "${message.request_text}". Interpret it creatively without copying copyrighted lyrics or imitating a living artist exactly.`
@@ -1512,7 +1540,7 @@ async function createRadioPrompt(
 				{
 					role: "system",
 					content:
-						"You are a music director for an always-on AI radio station. Return compact JSON only. Required string fields: title, prompt. Optional catalog fields: primary_genre, tags array, mood, energy 1-10, bpm_min, bpm_max, vocal_style. Every song must feel meaningfully different from adjacent generations. Never mirror a recent prompt's structure, exact instrument list, scene, or title pattern. The prompt must be original, richly musical, and suitable for a text-to-music model with internal lyric generation.",
+						"You are a music director for an always-on AI radio station. Return compact JSON only. Required string fields: title, prompt. Optional catalog fields: primary_genre, tags array, mood, energy 1-10, bpm_min, bpm_max, vocal_style. Every song must feel meaningfully different from adjacent generations. Never mirror a recent prompt's structure, exact instrument list, scene, or title pattern. Avoid fantasy-title formulas and repeated station motifs. The prompt must be original, richly musical, and suitable for a text-to-music model with internal lyric generation.",
 				},
 				{
 					role: "user",
@@ -1525,8 +1553,9 @@ Song ID entropy: ${message.song_id}
 Non-repeatable recipe for this exact song: ${uniqueness}
 ${recentTitleInstruction}
 ${recentPromptInstruction}
+${overuseInstruction}
 
-Create one surprising station-ready song concept. The final prompt must include the non-repeatable recipe as concrete musical instructions, not as a token or ID. Avoid references to specific copyrighted songs or direct artist imitation. Do not use generic titles like Echoflux, Open Frequency, Untitled Signal, or Signal Drift. Keep the prompt under 1200 characters. Add useful genre/tags/mood metadata for library filtering.`,
+Create one surprising station-ready song concept. The final prompt must include the non-repeatable recipe as concrete musical instructions, not as a token or ID. Avoid references to specific copyrighted songs or direct artist imitation. Do not use generic titles like Echoflux, Open Frequency, Untitled Signal, or Signal Drift. Titles must be 2-5 words, pronounceable, not include UUIDs or hex fragments, and use a fresh image or action rather than a recycled proper-noun formula. Keep the prompt under 1200 characters. Add useful genre/tags/mood metadata for library filtering.`,
 				},
 			],
 			response_format: PROMPT_PLAN_RESPONSE_FORMAT,
@@ -1558,6 +1587,18 @@ Create one surprising station-ready song concept. The final prompt must include 
 	};
 }
 
+async function ensureCatalogDistinctTitle(db: D1Database, title: string, message: RadioGenerateMessage): Promise<string> {
+	const clean = sanitizeRadioTitle(title) || fallbackTitle(message);
+	const existing = await db.prepare(
+		`SELECT id
+		 FROM songs
+		 WHERE lower(title) = lower(?)
+		 LIMIT 1`,
+	).bind(clean).first<{ id: string }>();
+	if (!existing) return clean;
+	return sanitizeRadioTitle(`${clean} ${titleSuffix(clean, [], message)}`) || `${clean} Signal ${message.song_id.slice(0, 4).toUpperCase()}`;
+}
+
 type RecentSongContext = {
 	title: string;
 	prompt: string;
@@ -1580,7 +1621,7 @@ async function recentSongContext(db: D1Database, stationId: string): Promise<Rec
 }
 
 function distinctRadioTitle(title: string, recentTitles: string[], message: RadioGenerateMessage): string {
-	const normalized = title.trim().replace(/\s+/g, " ") || fallbackTitle(message);
+	const normalized = sanitizeRadioTitle(title) || fallbackTitle(message);
 	const lower = normalized.toLowerCase();
 	const isRecent = recentTitles.some((recent) => recent.toLowerCase() === lower);
 	const isGeneric = ["echoflux", "open frequency", "untitled signal", "signal drift"].includes(lower);
@@ -1589,6 +1630,15 @@ function distinctRadioTitle(title: string, recentTitles: string[], message: Radi
 	const suffix = titleSuffix(normalized, recentTitles, message);
 	const expanded = `${normalized} ${suffix}`.replace(/\b(\w+)\s+\1\b/gi, "$1");
 	return expanded.slice(0, 120);
+}
+
+function sanitizeRadioTitle(title: string): string {
+	return title
+		.trim()
+		.replace(/\s+/g, " ")
+		.replace(/\s+[a-f0-9]{6,8}$/i, "")
+		.replace(/\b(\w+)\s+\1\b/gi, "$1")
+		.slice(0, 120);
 }
 
 function titleSuffix(title: string, recentTitles: string[], message: RadioGenerateMessage): string {
@@ -1640,18 +1690,24 @@ function normalizePromptFingerprint(value: string): string {
 function uniqueSongDirective(message: RadioGenerateMessage): string {
 	const seed = `${message.song_id}:${message.creative_seed}:${message.request_text ?? ""}`;
 	const instruments = [
-		"prepared piano pulses",
-		"rubbery fretless bass",
-		"granular vocal chops",
+		"cimbalom tremolo",
+		"muted vibraphone sparks",
+		"granular vocal pinwheels",
 		"glass marimba ostinato",
-		"detuned brass stabs",
-		"cassette choir pads",
+		"bass clarinet growls",
+		"stacked vowel choir pads",
 		"tabla-like electronic drums",
 		"bowed guitar harmonics",
 		"sub-octave handclaps",
 		"modular synth bubbles",
-		"close-mic whispered doubles",
-		"shimmering kalimba loops",
+		"breathy unison doubles",
+		"thumb piano cross-rhythms",
+		"waterphone scrapes",
+		"nylon-string guitar ticks",
+		"clipped vocoder syllables",
+		"upright bass knocks",
+		"steel pan arpeggios",
+		"processed field-recording percussion",
 	];
 	const structures = [
 		"cold open into half-time chorus",
@@ -1662,16 +1718,24 @@ function uniqueSongDirective(message: RadioGenerateMessage): string {
 		"final chorus with stacked counter-melodies",
 		"intro motif returning backwards in the outro",
 		"call-and-response hook with a rhythmic gap",
+		"false ending before a sparse last refrain",
+		"chorus melody first heard as a bass figure",
+		"two short verses separated by a wordless drop",
+		"outro that dissolves into hand percussion",
 	];
 	const textures = [
 		"rain-slick neon ambience",
 		"sunburned tape saturation",
-		"polished festival width",
+		"open-air stereo width",
 		"dusty basement compression",
 		"icy granular sparkle",
 		"warm valve-radio haze",
 		"dry close-up vocal intimacy",
 		"wide cinematic low-end bloom",
+		"salt-air spring reverb",
+		"soft-clipped drum bus grit",
+		"matte analog chorus",
+		"bright ceramic room reflections",
 	];
 	const hooks = [
 		"a rising three-note hook",
