@@ -1640,15 +1640,13 @@ function chunkValues<T>(values: T[], size: number): T[][] {
 }
 
 function songFromRow(row: SongRow, tags: string[]): RadioSong {
-	const generationInput = cleanLegacyJsonPrompts(parseJsonRecord(row.generation_input_json));
-	const promptPlan = cleanLegacyJsonPrompts(parseJsonRecord(row.prompt_plan_json)) as RadioPromptPlan | undefined;
 	return {
 		id: row.id,
 		station_id: row.station_id,
 		title: row.title,
-		prompt: cleanLegacyPromptArtifacts(row.prompt),
+		prompt: row.prompt,
 		cover_art_object_key: row.cover_art_object_key ?? undefined,
-		cover_art_prompt: row.cover_art_prompt ? cleanLegacyPromptArtifacts(row.cover_art_prompt) : undefined,
+		cover_art_prompt: row.cover_art_prompt ?? undefined,
 		cover_art_model: row.cover_art_model ?? undefined,
 		cover_art_created_at: row.cover_art_created_at ?? undefined,
 		request_id: row.request_id ?? undefined,
@@ -1657,8 +1655,8 @@ function songFromRow(row: SongRow, tags: string[]): RadioSong {
 		lyrics_source: row.lyrics_source ?? undefined,
 		music_model: row.music_model ?? undefined,
 		text_model: row.text_model ?? undefined,
-		generation_input: generationInput,
-		prompt_plan: promptPlan,
+		generation_input: parseJsonRecord(row.generation_input_json),
+		prompt_plan: parseJsonRecord(row.prompt_plan_json) as RadioPromptPlan | undefined,
 		format: row.format,
 		audio_object_key: row.audio_object_key,
 		metadata_object_key: row.metadata_object_key,
@@ -1685,26 +1683,6 @@ function parseJsonRecord(value: string | null): Record<string, unknown> | undefi
 	} catch {
 		return undefined;
 	}
-}
-
-function cleanLegacyJsonPrompts(record: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
-	if (!record) return undefined;
-	const next: Record<string, unknown> = { ...record };
-	for (const key of ["prompt", "lyrics", "cover_art_prompt"]) {
-		if (typeof next[key] === "string") next[key] = cleanLegacyPromptArtifacts(next[key]);
-	}
-	return next;
-}
-
-function cleanLegacyPromptArtifacts(value: string): string {
-	return value
-		.replace(/\bInternal uniqueness hash:\s*[A-Za-z0-9_-]+\.?\s*/gi, "")
-		.replace(/\b(?:Creative|Contrast) axis:\s*Invent a fresh concept from scratch using opaque entropy\s+[A-Za-z0-9_-]+\.?\s*/gi, "")
-		.replace(/\bDo not (?:quote|use|adapt) (?:this|the) (?:entropy|hash)[^.]*\.\s*/gi, "")
-		.replace(/\bEntropy is handled outside the prompt\.[^.]*\.\s*/gi, "")
-		.replace(/\bTempo center:\s*(?:around\s*)?\d+\s*BPM\.?\s*/gi, "")
-		.replace(/\s+/g, " ")
-		.trim();
 }
 
 async function persistSongCatalog(db: D1Database, song: RadioSong): Promise<void> {
@@ -3511,9 +3489,9 @@ async function recentSongContext(db: D1Database, stationId: string): Promise<Rec
 	}>();
 	return (rows.results ?? []).map((row) => ({
 		title: row.title,
-		prompt: cleanLegacyPromptArtifacts(row.prompt),
+		prompt: row.prompt,
 		lyrics: row.lyrics ?? undefined,
-		cover_art_prompt: row.cover_art_prompt ? cleanLegacyPromptArtifacts(row.cover_art_prompt) : undefined,
+		cover_art_prompt: row.cover_art_prompt ?? undefined,
 		primary_genre: row.primary_genre ?? undefined,
 		mood: row.mood ?? undefined,
 		energy: row.energy ?? undefined,
@@ -3634,9 +3612,9 @@ function normalizeStoredRadioSong(song: Partial<RadioSong>, message: RadioGenera
 		id: typeof song.id === "string" && song.id ? song.id : message.song_id,
 		station_id: typeof song.station_id === "string" && song.station_id ? song.station_id : message.station_id,
 		title: typeof song.title === "string" && song.title ? song.title : fallbackTitle(message),
-		prompt: typeof song.prompt === "string" && song.prompt ? cleanLegacyPromptArtifacts(song.prompt) : fallbackRadioPrompt(message).prompt,
+		prompt: typeof song.prompt === "string" && song.prompt ? song.prompt : fallbackRadioPrompt(message).prompt,
 		cover_art_object_key: typeof song.cover_art_object_key === "string" && song.cover_art_object_key ? song.cover_art_object_key : undefined,
-		cover_art_prompt: typeof song.cover_art_prompt === "string" && song.cover_art_prompt ? cleanLegacyPromptArtifacts(song.cover_art_prompt) : undefined,
+		cover_art_prompt: typeof song.cover_art_prompt === "string" && song.cover_art_prompt ? song.cover_art_prompt : undefined,
 		cover_art_model: typeof song.cover_art_model === "string" && song.cover_art_model ? song.cover_art_model : undefined,
 		cover_art_created_at: typeof song.cover_art_created_at === "number" ? song.cover_art_created_at : undefined,
 		request_id: typeof song.request_id === "string" && song.request_id ? song.request_id : message.request_id,
@@ -3645,8 +3623,8 @@ function normalizeStoredRadioSong(song: Partial<RadioSong>, message: RadioGenera
 		lyrics_source: typeof song.lyrics_source === "string" && song.lyrics_source ? song.lyrics_source : undefined,
 		music_model: typeof song.music_model === "string" && song.music_model ? song.music_model : RADIO_MUSIC_MODEL,
 		text_model: typeof song.text_model === "string" && song.text_model ? song.text_model : RADIO_TEXT_MODEL,
-		generation_input: song.generation_input && typeof song.generation_input === "object" ? cleanLegacyJsonPrompts(song.generation_input) : undefined,
-		prompt_plan: song.prompt_plan && typeof song.prompt_plan === "object" ? cleanLegacyJsonPrompts(song.prompt_plan) as RadioPromptPlan : undefined,
+		generation_input: song.generation_input && typeof song.generation_input === "object" ? song.generation_input : undefined,
+		prompt_plan: song.prompt_plan && typeof song.prompt_plan === "object" ? song.prompt_plan as RadioPromptPlan : undefined,
 		format: song.format === "wav" ? "wav" : "mp3",
 		audio_object_key: typeof song.audio_object_key === "string" && song.audio_object_key ? song.audio_object_key : radioAudioObjectKey(message.song_id, message.format),
 		metadata_object_key: typeof song.metadata_object_key === "string" && song.metadata_object_key ? song.metadata_object_key : radioMetadataObjectKey(message.song_id),
@@ -3688,7 +3666,7 @@ function fallbackTitle(message: RadioGenerateMessage): string {
 }
 
 function isFallbackTitle(title: string): boolean {
-	return /^Track [A-Z0-9]{4,}$/i.test(title) || title.trim().toLowerCase() === "untitled radio track";
+	return title.trim().toLowerCase() === "untitled radio track";
 }
 
 function stableNumberFromString(value: string): number {
