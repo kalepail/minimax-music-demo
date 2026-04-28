@@ -77,6 +77,7 @@ import {
 const COVER_PROMPT_PREFIX = "Square pictorial music image v4.";
 const RECENT_CONTEXT_LIMIT = 80;
 const D1_IN_CLAUSE_CHUNK_SIZE = 75;
+const LEGACY_RADIO_STATION_METADATA_KEYS = ["playlist", "fulfilled_requests", "playlist_catalog_refreshed_at"];
 const APP_EVENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const RADIO_WORKFLOW_SUCCESS_RETENTION = "7 days";
 const RADIO_WORKFLOW_ERROR_RETENTION = "14 days";
@@ -464,6 +465,7 @@ export class MusicJob extends DurableObject<Env> {
 
 export class RadioStation extends DurableObject<Env> {
 	async status(): Promise<RadioStatus> {
+		await this.purgeLegacyCompletedSongState();
 		const [playlist, storedRequests, inFlight] = await Promise.all([
 			loadStationPlaylist(this.env.DB, RADIO_STATION_ID),
 			this.requests(),
@@ -483,6 +485,7 @@ export class RadioStation extends DurableObject<Env> {
 	}
 
 	async request(text: string, stationId = RADIO_STATION_ID, genre?: string): Promise<{ request: RadioRequest; queued: number; generation_jobs_queued: number; pending_requests: number; assigned_requests: number }> {
+		await this.purgeLegacyCompletedSongState();
 		const request: RadioRequest = {
 			id: crypto.randomUUID(),
 			text,
@@ -502,6 +505,7 @@ export class RadioStation extends DurableObject<Env> {
 	}
 
 	async fill(target = RADIO_TARGET_BACKLOG, stationId = RADIO_STATION_ID, genre?: string): Promise<number> {
+		await this.purgeLegacyCompletedSongState();
 		const now = Date.now();
 		let requests = [...(await this.requests())];
 		const existingInFlight = await this.inFlight();
@@ -613,6 +617,7 @@ export class RadioStation extends DurableObject<Env> {
 	}
 
 	async complete(song: RadioSong): Promise<void> {
+		await this.purgeLegacyCompletedSongState();
 		const existingInFlight = await this.inFlight();
 		const completedInFlight = existingInFlight.find((item) => item.song_id === song.id);
 		const inFlight = existingInFlight.filter((item) => item.song_id !== song.id);
@@ -701,6 +706,10 @@ export class RadioStation extends DurableObject<Env> {
 		const reservations = ((await this.ctx.storage.get<RadioDraftReservation[]>("draft_reservations")) ?? [])
 			.filter((item) => item.song_id !== songId);
 		await this.ctx.storage.put("draft_reservations", reservations);
+	}
+
+	private async purgeLegacyCompletedSongState(): Promise<void> {
+		await this.ctx.storage.delete(LEGACY_RADIO_STATION_METADATA_KEYS);
 	}
 }
 
