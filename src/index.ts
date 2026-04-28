@@ -1625,18 +1625,23 @@ async function createRadioLyrics(
 	const requestInstruction = message.request_text
 		? `Listener request to satisfy once: "${message.request_text}". Transform it into a complete lyric concept; do not paste the request as the lyrics.`
 		: "No listener request is active. Invent a complete lyric concept that fits the prompt.";
-	const response = await env.AI.run(
-		RADIO_LYRICS_MODEL,
-		{
-			messages: [
-				{
-					role: "system",
-					content:
-						"You are a professional lyricist for an always-on AI radio station. Return JSON only with lyrics, lyric_theme, and hook. Write original, singable lyrics for MiniMax Music 2.6. Use bracketed section tags only, such as [Intro], [Verse 1], [Pre Chorus], [Chorus], [Bridge], [Break], [Outro]. Do not use labels like Verse: or Chorus:. Do not include markdown, commentary, chord names, metadata, artist names, song IDs, UUIDs, creative seeds, or copyrighted lyrics. Do not write the title as a heading or repeat it mechanically. Avoid generic filler and overused rhymes around night/light/fire/sky unless the concept truly needs them.",
-				},
-				{
-					role: "user",
-					content: `${requestInstruction}
+	let lastSnippet: string | undefined;
+	for (let attempt = 0; attempt < 2; attempt++) {
+		const repairInstruction = attempt === 0
+			? ""
+			: `\nQuality repair: the previous lyric draft was rejected. Rewrite it longer, more specific, and more complete. Every section tag must be on its own line, followed by lyric lines. Minimum 900 characters and 20 non-tag lyric lines.`;
+		const response = await env.AI.run(
+			RADIO_LYRICS_MODEL,
+			{
+				messages: [
+					{
+						role: "system",
+						content:
+							"You are a professional lyricist for an always-on AI radio station. Return JSON only with lyrics, lyric_theme, and hook. Write original, singable lyrics for MiniMax Music 2.6. Use bracketed section tags only, such as [Intro], [Verse 1], [Pre Chorus], [Chorus], [Bridge], [Break], [Outro]. Put each section tag on its own line. Do not use labels like Verse: or Chorus:. Do not include markdown, commentary, chord names, metadata, artist names, song IDs, UUIDs, creative seeds, or copyrighted lyrics. Do not write the title as a heading or repeat it mechanically. Avoid generic filler and overused rhymes around night/light/fire/sky unless the concept truly needs them.",
+					},
+					{
+						role: "user",
+						content: `${requestInstruction}
 Title for catalog reference only: ${title}
 Music prompt: ${plan.prompt}
 Genre: ${plan.primary_genre ?? "open genre"}
@@ -1648,27 +1653,27 @@ Vocal style: ${plan.vocal_style ?? "expressive lead vocal with memorable hook"}
 Unique arrangement constraint: ${uniqueSongDirective(message)}
 ${recentTitleInstruction}
 
-Write 700-1700 characters of lyrics with 18-36 non-tag lyric lines. Include at least [Verse 1], [Chorus], [Verse 2], [Bridge], and [Outro]. Make the chorus memorable but not slogan-like. Keep imagery concrete, strange, and internally coherent. Make each line short enough to sing. Return only JSON.`,
-				},
-			],
-			response_format: LYRICS_RESPONSE_FORMAT,
-		},
-		{
-			gateway: {
-				id: env.AI_GATEWAY_ID,
-				requestTimeoutMs: 60_000,
-				retries: { maxAttempts: 1 },
+Write 900-1800 characters of lyrics with 20-40 non-tag lyric lines. Include at least [Verse 1], [Chorus], [Verse 2], [Bridge], and [Outro]. Put section tags on separate lines. Make the chorus memorable but not slogan-like. Keep imagery concrete, strange, and internally coherent. Make each line short enough to sing. Return only JSON.${repairInstruction}`,
+					},
+				],
+				response_format: LYRICS_RESPONSE_FORMAT,
 			},
-			signal: AbortSignal.timeout(60_000),
-		},
-	);
+			{
+				gateway: {
+					id: env.AI_GATEWAY_ID,
+					requestTimeoutMs: 60_000,
+					retries: { maxAttempts: 1 },
+				},
+				signal: AbortSignal.timeout(60_000),
+			},
+		);
 
-	const parsed = parseLyricsResponse(response);
-	const lyrics = normalizeRadioLyrics(parsed.lyrics ?? "");
-	if (!isUsableRadioLyrics(lyrics)) {
-		throw new Error(`lyric model returned unusable lyrics: ${snippet(response) ?? "empty response"}`);
+		const parsed = parseLyricsResponse(response);
+		const lyrics = normalizeRadioLyrics(parsed.lyrics ?? "");
+		if (isUsableRadioLyrics(lyrics)) return lyrics;
+		lastSnippet = snippet(response) ?? "empty response";
 	}
-	return lyrics;
+	throw new Error(`lyric model returned unusable lyrics: ${lastSnippet ?? "empty response"}`);
 }
 
 async function ensureCatalogDistinctTitle(db: D1Database, title: string, message: RadioGenerateMessage): Promise<string> {
@@ -2021,6 +2026,7 @@ function normalizeRadioLyrics(value: string): string {
 		.replace(/\s*```$/i, "")
 		.replace(/\r\n?/g, "\n")
 		.replace(/\\n/g, "\n")
+		.replace(/^\s*\[(Intro|Verse(?:\s+\d+)?|Pre[- ]?Chorus|Chorus|Hook|Bridge|Break|Outro)\]\s+(.+)$/gim, "[$1]\n$2")
 		.replace(/^\s*(Intro|Verse(?:\s+\d+)?|Pre[- ]?Chorus|Chorus|Hook|Bridge|Break|Outro)\s*:\s*(.+)$/gim, "[$1]\n$2")
 		.replace(/^\s*(Intro|Verse(?:\s+\d+)?|Pre[- ]?Chorus|Chorus|Hook|Bridge|Break|Outro)\s*:\s*$/gim, "[$1]")
 		.replace(/\n{3,}/g, "\n\n")
@@ -2033,13 +2039,13 @@ function normalizeRadioLyrics(value: string): string {
 }
 
 function isUsableRadioLyrics(lyrics: string): boolean {
-	if (lyrics.length < 300 || lyrics.length > LYRICS_MAX_CHARS) return false;
+	if (lyrics.length < 650 || lyrics.length > LYRICS_MAX_CHARS) return false;
 	if (!/\[Verse(?:\s+\d+)?\]/i.test(lyrics) || !/\[Chorus\]/i.test(lyrics)) return false;
 	if (/\b[a-z]+-[a-z]+-[a-f0-9]{6,}\b/i.test(lyrics)) return false;
 	if (/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}/i.test(lyrics)) return false;
 	if (/^\s*(Verse|Chorus|Bridge|Outro)\s*:/im.test(lyrics)) return false;
 	const lyricLines = lyrics.split("\n").map((line) => line.trim()).filter((line) => line && !/^\[[^\]]+\]$/.test(line));
-	if (lyricLines.length < 10) return false;
+	if (lyricLines.length < 16) return false;
 	const uniqueLines = new Set(lyricLines.map((line) => line.toLowerCase()));
 	return uniqueLines.size >= Math.ceil(lyricLines.length * 0.55);
 }
