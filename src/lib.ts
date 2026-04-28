@@ -217,7 +217,6 @@ export const RADIO_COVER_MODELS = [
 	"@cf/bytedance/stable-diffusion-xl-lightning",
 	"@cf/stabilityai/stable-diffusion-xl-base-1.0",
 ] as const;
-export const RADIO_COVER_MODEL = RADIO_COVER_MODELS[0];
 export const LIBRARY_MAX_LIMIT = 100;
 export const LIBRARY_DEFAULT_LIMIT = 25;
 

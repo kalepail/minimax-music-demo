@@ -375,10 +375,6 @@ export class MusicJob extends DurableObject<Env> {
 			error: persistedAudio ? undefined : errorMsg ?? snippet(result),
 		};
 		current = { ...current, attempt_log: [...current.attempt_log, attemptLog] };
-		console.log("MusicJob attempt", {
-			duration_ms: attemptLog.duration_ms,
-			error: attemptLog.error,
-		});
 
 		if (persistedAudio) {
 			await this.finalize({
@@ -976,7 +972,7 @@ async function recordAppEvent(env: Env, event: AppEvent): Promise<void> {
 	};
 	if (event.level === "error") console.error("app_event", payload);
 	else if (event.level === "warn") console.warn("app_event", payload);
-	else console.log("app_event", payload);
+	else console.info("app_event", payload);
 	try {
 		await env.DB.prepare(
 			`INSERT INTO app_events (
