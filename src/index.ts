@@ -30,11 +30,13 @@ import {
 	extractTextResponse,
 	isExpiredRateLimit,
 	json,
+	prepareAudioBodyForStorage,
 	parseRangeHeader,
 	rangeNotSatisfiableHeaders,
 	isStaleRunningJob,
 	normalizeBoundedInt,
 	normalizeFacet,
+	normalizeGeneratedTitle,
 	normalizeTags,
 	parseLibraryQuery,
 	parseInput,
@@ -420,7 +422,8 @@ export class MusicJob extends DurableObject<Env> {
 
 		const contentType = upstream.headers.get("content-type") ?? (job.input.format === "wav" ? "audio/wav" : "audio/mpeg");
 		const key = job.audio_object_key ?? audioObjectKey(crypto.randomUUID(), job.input.format);
-		await this.env.AUDIO_BUCKET.put(key, upstream.body, {
+		const audio = prepareAudioBodyForStorage(await upstream.arrayBuffer());
+		await this.env.AUDIO_BUCKET.put(key, audio.body, {
 			httpMetadata: {
 				cacheControl: "no-store",
 				contentType,
@@ -2238,8 +2241,29 @@ async function generateAndPersistRadioAudio(message: RadioGenerateMessage, env: 
 	}
 
 	const contentType = upstream.headers.get("content-type") ?? "audio/mpeg";
+	const audioBody = prepareAudioBodyForStorage(await upstream.arrayBuffer());
+	if (audioBody.duplicate_removed) {
+		await recordAppEvent(env, {
+			level: "warn",
+			event: "audio_duplicate_removed",
+			operation: "radio_music",
+			model: RADIO_MUSIC_MODEL,
+			song_id: message.song_id,
+			request_id: message.request_id,
+			workflow_instance_id: radioSongWorkflowInstanceId(message.song_id),
+			duration_ms: Date.now() - modelStartedAt,
+			message: "Removed exact duplicated MP3 half before R2 persistence",
+			details: {
+				audio_object_key: audioObjectKey,
+				original_bytes: audioBody.original_bytes,
+				stored_bytes: audioBody.stored_bytes,
+				content_type: contentType,
+				format: message.format,
+			},
+		});
+	}
 	try {
-		await env.AUDIO_BUCKET.put(audioObjectKey, upstream.body, {
+		await env.AUDIO_BUCKET.put(audioObjectKey, audioBody.body, {
 			httpMetadata: {
 				cacheControl: "public, max-age=3600",
 				contentType,
@@ -2580,8 +2604,18 @@ function coverArtPrompt(song: RadioSong, overusedNouns: ReadonlyArray<OverusedNo
 	const genre = song.primary_genre ?? "genre-fluid pop";
 	const mood = song.mood ?? "cinematic";
 	const direction = sanitizeCoverFragment(song.creative_axis ?? song.vocal_style ?? "", retiredWords);
+	const title = sanitizeCoverFragment(song.title, retiredWords);
+	const request = sanitizeCoverFragment(song.request_text ?? "", retiredWords);
+	const promptWorld = sanitizeCoverFragment(song.prompt, retiredWords, 360);
+	const lyricWorld = sanitizeCoverFragment(lyricVisualSeed(song.lyrics), retiredWords, 260);
+	const anchors = [
+		title ? `Concept anchor: ${title}.` : "",
+		request ? `Listener request anchor: ${request}.` : "",
+		lyricWorld ? `Story imagery to visualize: ${lyricWorld}.` : "",
+		promptWorld ? `Musical world to translate pictorially: ${promptWorld}.` : "",
+	].filter(Boolean).join(" ");
 	const retired = overusedNouns.length > 0 ? ` Avoid recurring station visual motifs and trope imagery associated with: ${overusedNouns.map((entry) => entry.word).join(", ")}.` : "";
-	return `${COVER_PROMPT_PREFIX} ${genre}, ${mood}, ${tags}. ${direction ? `Visual direction: ${direction}.` : ""}${retired} Focus on scene, color, lighting, texture, characters, landscape, architecture, abstract pattern, and motion. Use blank unmarked surfaces and purely pictorial shapes. Avoid devices, cassettes, posters, signage, labels, logos, watermarks, letters, numerals, and readable symbols. Bold editorial feeling, tactile texture, striking central composition, rich color contrast, layered depth, handmade detail, frame filled edge-to-edge with continuous visual detail.`;
+	return `${COVER_PROMPT_PREFIX} ${genre}, ${mood}, ${tags}. ${anchors} ${direction ? `Visual direction: ${direction}.` : ""}${retired} Make the image feel grounded in this specific song, not generic genre art. Focus on scene, color, lighting, texture, characters, landscape, architecture, abstract pattern, and motion. Use blank unmarked surfaces and purely pictorial shapes. Avoid devices, cassettes, posters, signage, labels, logos, watermarks, letters, numerals, and readable symbols. Bold editorial feeling, tactile texture, striking central composition, rich color contrast, layered depth, handmade detail, frame filled edge-to-edge with continuous visual detail.`.replace(/\s+/g, " ").trim();
 }
 
 function visualSafeTags(tags: string[], retiredWords: ReadonlySet<string> = new Set()): string[] {
@@ -2589,7 +2623,7 @@ function visualSafeTags(tags: string[], retiredWords: ReadonlySet<string> = new 
 	return tags.filter((tag) => !blocked.test(tag) && !containsRetiredWord(tag, retiredWords)).slice(0, 5);
 }
 
-function sanitizeCoverFragment(value: string, retiredWords: ReadonlySet<string> = new Set()): string {
+function sanitizeCoverFragment(value: string, retiredWords: ReadonlySet<string> = new Set(), maxLength = 180): string {
 	const blocked = /\b(text|typography|letter|word|lyric|caption|sign|signage|logo|label|title|glyph|hieroglyph|alphabet|number|poster|newspaper|book|page|banner|watermark|radio|cassette|tape|album|cover)\b/gi;
 	return value
 		.replace(/["'`]/g, "")
@@ -2597,12 +2631,22 @@ function sanitizeCoverFragment(value: string, retiredWords: ReadonlySet<string> 
 		.replace(/[a-z]{4,}/gi, (word) => retiredWords.has(word.toLowerCase()) ? "fresh visual element" : word)
 		.replace(/\s+/g, " ")
 		.trim()
-		.slice(0, 180);
+		.slice(0, maxLength);
 }
 
 function containsRetiredWord(value: string, retiredWords: ReadonlySet<string>): boolean {
 	if (retiredWords.size === 0) return false;
 	return (value.toLowerCase().match(/[a-z]{4,}/g) ?? []).some((word) => retiredWords.has(word));
+}
+
+function lyricVisualSeed(lyrics: string | undefined): string {
+	if (!lyrics) return "";
+	return lyrics
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line && !/^\[[^\]]+\]$/.test(line))
+		.slice(0, 12)
+		.join(" ");
 }
 
 function coverModelForSong(songId: string): typeof RADIO_COVER_MODELS[number] {
@@ -3267,12 +3311,7 @@ function distinctRadioTitle(title: string, recentTitles: string[], message: Radi
 }
 
 function sanitizeRadioTitle(title: string): string {
-	return title
-		.trim()
-		.replace(/\s+/g, " ")
-		.replace(/\s+[a-f0-9]{6,8}$/i, "")
-		.replace(/\b(\w+)\s+\1\b/gi, "$1")
-		.slice(0, 120);
+	return normalizeGeneratedTitle(title);
 }
 
 function containsEntropyLeak(value: string): boolean {
@@ -3610,11 +3649,36 @@ function looseStringField(text: string, field: string, nextFields: string[]): st
 	if (start < 0) return undefined;
 	const valueStart = text.indexOf("\"", text.indexOf(":", start)) + 1;
 	if (valueStart <= 0) return undefined;
+	const parsed = readLooseQuotedString(text, valueStart);
+	if (parsed !== undefined) return parsed.trim();
 	const nextPattern = nextFields.length > 0 ? new RegExp(`"\\s*,\\s*"(${nextFields.join("|")})"\\s*:`) : /\s*"\s*[,}]\s*$/;
 	const rest = text.slice(valueStart);
 	const next = rest.search(nextPattern);
 	const raw = next >= 0 ? rest.slice(0, next) : rest.replace(/"\s*}\s*$/, "");
 	return raw.replace(/\\"/g, "\"").replace(/\\n/g, "\n").trim();
+}
+
+function readLooseQuotedString(text: string, valueStart: number): string | undefined {
+	let value = "";
+	let escaped = false;
+	for (let i = valueStart; i < text.length; i++) {
+		const char = text[i];
+		if (escaped) {
+			if (char === "n") value += "\n";
+			else if (char === "r") value += "\r";
+			else if (char === "t") value += "\t";
+			else value += char;
+			escaped = false;
+			continue;
+		}
+		if (char === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (char === "\"") return value;
+		value += char;
+	}
+	return undefined;
 }
 
 function looseArrayField(text: string, field: string): string[] {

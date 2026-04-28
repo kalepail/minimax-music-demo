@@ -180,6 +180,13 @@ export type StoredAudioRange = {
 	total: number;
 };
 
+export type PreparedAudioBody = {
+	body: ArrayBuffer;
+	duplicate_removed: boolean;
+	original_bytes: number;
+	stored_bytes: number;
+};
+
 export type RateLimitRecord = {
 	window_start: number;
 	count: number;
@@ -342,6 +349,47 @@ export function audioObjectKey(jobId: string, format: MusicInput["format"]): str
 	return `music/${jobId}.${format}`;
 }
 
+export function prepareAudioBodyForStorage(input: ArrayBuffer): PreparedAudioBody {
+	const bytes = new Uint8Array(input);
+	if (isExactRepeatedMp3(bytes)) {
+		const half = bytes.byteLength / 2;
+		return {
+			body: input.slice(0, half),
+			duplicate_removed: true,
+			original_bytes: bytes.byteLength,
+			stored_bytes: half,
+		};
+	}
+	return {
+		body: input,
+		duplicate_removed: false,
+		original_bytes: bytes.byteLength,
+		stored_bytes: bytes.byteLength,
+	};
+}
+
+function isExactRepeatedMp3(bytes: Uint8Array): boolean {
+	if (bytes.byteLength < 2 || bytes.byteLength % 2 !== 0) return false;
+	const half = bytes.byteLength / 2;
+	if (!looksLikeMp3Start(bytes, 0) || !looksLikeMp3Start(bytes, half)) return false;
+	for (let i = 0; i < half; i++) {
+		if (bytes[i] !== bytes[half + i]) return false;
+	}
+	return true;
+}
+
+function looksLikeMp3Start(bytes: Uint8Array, offset: number): boolean {
+	if (bytes.byteLength - offset < 4) return false;
+	if (
+		bytes[offset] === 0x49 &&
+		bytes[offset + 1] === 0x44 &&
+		bytes[offset + 2] === 0x33
+	) {
+		return true;
+	}
+	return bytes[offset] === 0xff && (bytes[offset + 1] & 0xe0) === 0xe0;
+}
+
 export function radioAudioObjectKey(songId: string, format: MusicInput["format"]): string {
 	return `radio/audio/${songId}.${format}`;
 }
@@ -397,6 +445,22 @@ export function normalizeBoundedInt(value: unknown, min: number, max: number): n
 	if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
 	const integer = Math.round(value);
 	return Math.min(max, Math.max(min, integer));
+}
+
+export function normalizeGeneratedTitle(title: string): string {
+	return title
+		.trim()
+		.replace(/^```(?:json|text)?\s*/i, "")
+		.replace(/\s*```$/i, "")
+		.replace(/\\n/g, " ")
+		.replace(/\r?\n/g, " ")
+		.replace(/\s+/g, " ")
+		.replace(/\s*["'`]*\s*[,}]+\s*["'`]*\s*$/g, "")
+		.replace(/^["'`]+|["'`]+$/g, "")
+		.replace(/\s+[a-f0-9]{6,8}$/i, "")
+		.replace(/\b(\w+)\s+\1\b/gi, "$1")
+		.trim()
+		.slice(0, 120);
 }
 
 const MOTIF_STOPWORDS: ReadonlySet<string> = new Set([

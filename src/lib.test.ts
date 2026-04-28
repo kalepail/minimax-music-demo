@@ -18,6 +18,7 @@ import {
 	parseInput,
 	parseRadioRequest,
 	parseStationParams,
+	prepareAudioBodyForStorage,
 	publicStatus,
 	genreStationId,
 	radioAudioObjectKey,
@@ -26,6 +27,7 @@ import {
 	overusedNounTerms,
 	recurringMotifs,
 	normalizeTags,
+	normalizeGeneratedTitle,
 	storedAudioResponseHeaders,
 	storedAudioStatus,
 	shouldCleanUp,
@@ -204,6 +206,33 @@ describe("audioObjectKey", () => {
 	});
 });
 
+describe("prepareAudioBodyForStorage", () => {
+	it("removes exact duplicated MP3 halves", () => {
+		const half = new Uint8Array([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0xff, 0xfb, 0xd0, 0x00, 0xaa]);
+		const doubled = new Uint8Array(half.length * 2);
+		doubled.set(half, 0);
+		doubled.set(half, half.length);
+
+		const result = prepareAudioBodyForStorage(doubled.buffer);
+
+		expect(result.duplicate_removed).toBe(true);
+		expect(result.original_bytes).toBe(doubled.byteLength);
+		expect(result.stored_bytes).toBe(half.byteLength);
+		expect([...new Uint8Array(result.body)]).toEqual([...half]);
+	});
+
+	it("keeps normal MP3 bodies intact", () => {
+		const body = new Uint8Array([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0xff, 0xfb, 0xd0, 0x00, 0xaa, 0xbb]);
+
+		const result = prepareAudioBodyForStorage(body.buffer);
+
+		expect(result.duplicate_removed).toBe(false);
+		expect(result.original_bytes).toBe(body.byteLength);
+		expect(result.stored_bytes).toBe(body.byteLength);
+		expect([...new Uint8Array(result.body)]).toEqual([...body]);
+	});
+});
+
 describe("radio helpers", () => {
 	it("creates stable station R2 keys", () => {
 		expect(radioAudioObjectKey("song-123", "mp3")).toBe("radio/audio/song-123.mp3");
@@ -222,6 +251,12 @@ describe("radio helpers", () => {
 
 	it("deduplicates and limits normalized tags", () => {
 		expect(normalizeTags([" Disco ", "disco", "", 3, "Modular Synth"])).toEqual(["disco", "modular synth"]);
+	});
+
+	it("removes model response artifacts from generated titles", () => {
+		expect(normalizeGeneratedTitle('Wiring the Rain" } ```')).toBe("Wiring the Rain");
+		expect(normalizeGeneratedTitle("```json\n\"Copper Choir\"\n```")).toBe("Copper Choir");
+		expect(normalizeGeneratedTitle("Static Static")).toBe("Static");
 	});
 
 	it("parses library filters and pagination", () => {
