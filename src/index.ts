@@ -98,6 +98,7 @@ import {
 	titleRepairUserPrompt,
 } from "./prompts";
 const RECENT_CONTEXT_LIMIT = 80;
+const RECENT_CONTEXT_CACHE_TTL_MS = 10_000;
 
 const STRUCTURAL_CONSTRAINTS = [
 	"Use an unusual time signature like 5/4, 7/8, or alternating meters to give the rhythm a distinctive feel.",
@@ -3035,7 +3036,12 @@ type RecentSongContext = {
 	vocal_style?: string;
 };
 
+const recentSongContextCache = new Map<string, { data: RecentSongContext[]; expires: number }>();
+
 async function recentSongContext(db: D1Database, stationId: string): Promise<RecentSongContext[]> {
+	const cached = recentSongContextCache.get(stationId);
+	if (cached && cached.expires > Date.now()) return cached.data;
+
 	const rows = await db.prepare(
 		`SELECT title, prompt, lyrics, cover_art_prompt, primary_genre, mood, energy, bpm_min, bpm_max, vocal_style
 		 FROM songs
@@ -3054,7 +3060,7 @@ async function recentSongContext(db: D1Database, stationId: string): Promise<Rec
 		bpm_max: number | null;
 		vocal_style: string | null;
 	}>();
-	return (rows.results ?? []).map((row) => ({
+	const data = (rows.results ?? []).map((row) => ({
 		title: row.title,
 		prompt: row.prompt,
 		lyrics: row.lyrics ?? undefined,
@@ -3066,6 +3072,8 @@ async function recentSongContext(db: D1Database, stationId: string): Promise<Rec
 		bpm_max: row.bpm_max ?? undefined,
 		vocal_style: row.vocal_style ?? undefined,
 	})).filter((row) => row.title || row.prompt);
+	recentSongContextCache.set(stationId, { data, expires: Date.now() + RECENT_CONTEXT_CACHE_TTL_MS });
+	return data;
 }
 
 function overusedNounRetirementInstruction(recent: ReadonlyArray<RecentSongContext>): string {
