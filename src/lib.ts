@@ -384,6 +384,10 @@ export function radioCoverObjectKey(songId: string): string {
 	return `radio/covers/${songId}.jpg`;
 }
 
+export function radioDetailsObjectKey(songId: string): string {
+	return `radio/details/${songId}.json`;
+}
+
 export function genreStationId(genre: string): string {
 	return `genre:${slugifyFacet(canonicalGenreKey(genre) ?? genre)}`;
 }

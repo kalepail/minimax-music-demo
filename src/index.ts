@@ -48,6 +48,7 @@ import {
 	publicStatus,
 	radioAudioObjectKey,
 	radioCoverObjectKey,
+	radioDetailsObjectKey,
 	overusedNounMatches,
 	overusedNounTerms,
 	shouldCleanUp,
@@ -121,7 +122,7 @@ const STRUCTURAL_CONSTRAINTS = [
 	"Build around rhythmic displacement — shift the main groove by an eighth note or sixteenth note to create a lopsided, compelling feel.",
 ] as const;
 const D1_IN_CLAUSE_CHUNK_SIZE = 75;
-const APP_EVENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
 const RADIO_WORKFLOW_SUCCESS_RETENTION = "7 days";
 const RADIO_WORKFLOW_ERROR_RETENTION = "14 days";
 const RADIO_PROMPT_TIMEOUT_MS = 30_000;
@@ -219,23 +220,6 @@ type AppEvent = {
 	details?: Record<string, unknown>;
 };
 
-type AppEventRow = {
-	id: number;
-	created_at: number;
-	level: AppEventLevel;
-	event: string;
-	operation: string | null;
-	model: string | null;
-	song_id: string | null;
-	request_id: string | null;
-	workflow_instance_id: string | null;
-	job_id: string | null;
-	status_code: number | null;
-	duration_ms: number | null;
-	message: string | null;
-	details_json: string | null;
-};
-
 export class MusicJob extends DurableObject<Env> {
 	async start(input: MusicInput, jobId: string): Promise<void> {
 		const existing = await this.ctx.storage.get<JobRecord>("job");
@@ -295,7 +279,7 @@ export class MusicJob extends DurableObject<Env> {
 				duration_ms: job.started_at ? now - job.started_at : 0,
 				error: "Generation timed out before completing",
 			};
-			await recordAppEvent(this.env, {
+			logAppEvent({
 				level: "error",
 				event: "job_timeout",
 				operation: "single_song_music",
@@ -324,7 +308,7 @@ export class MusicJob extends DurableObject<Env> {
 
 		const gatewayId = this.env.AI_GATEWAY_ID;
 		if (!gatewayId) {
-			await recordAppEvent(this.env, {
+			logAppEvent({
 				level: "error",
 				event: "configuration_error",
 				operation: "single_song_music",
@@ -381,7 +365,7 @@ export class MusicJob extends DurableObject<Env> {
 			);
 		} catch (err) {
 			errorMsg = err instanceof Error ? err.message : "AI run failed";
-			await recordAppEvent(this.env, {
+			logAppEvent({
 				level: "error",
 				event: "model_error",
 				operation: "single_song_music",
@@ -405,7 +389,7 @@ export class MusicJob extends DurableObject<Env> {
 				persistedAudio = await this.persistAudio(current, audio as string);
 			} catch (err) {
 				errorMsg = err instanceof Error ? err.message : "Audio persistence failed";
-				await recordAppEvent(this.env, {
+				logAppEvent({
 					level: "error",
 					event: "audio_persistence_error",
 					operation: "single_song_music",
@@ -444,7 +428,7 @@ export class MusicJob extends DurableObject<Env> {
 			error: attemptLog.error ?? "Model returned no audio URL",
 			completed_at: attemptEnded,
 		});
-		await recordAppEvent(this.env, {
+		logAppEvent({
 			level: "error",
 			event: "job_failed",
 			operation: "single_song_music",
@@ -494,7 +478,7 @@ export class MusicJob extends DurableObject<Env> {
 				error: err instanceof Error ? err.message : String(err),
 				key: job.audio_object_key,
 			});
-			await recordAppEvent(this.env, {
+			logAppEvent({
 				level: "warn",
 				event: "audio_delete_failed",
 				operation: "single_song_cleanup",
@@ -621,7 +605,7 @@ export class RadioStation extends DurableObject<Env> {
 					this.ctx.storage.put("in_flight", [...freshInFlight, ...createdInFlight]),
 					this.ctx.storage.put("requests", releasedRequests),
 				]);
-				await recordAppEvent(this.env, {
+				logAppEvent({
 					level: "warn",
 					event: "workflow_create_batch_partial",
 					operation: "radio_fill",
@@ -643,7 +627,7 @@ export class RadioStation extends DurableObject<Env> {
 				this.ctx.storage.put("in_flight", freshInFlight),
 				this.ctx.storage.put("requests", releasedRequests),
 			]);
-			await recordAppEvent(this.env, {
+			logAppEvent({
 				level: "error",
 				event: "workflow_create_batch_failed",
 				operation: "radio_fill",
@@ -808,26 +792,26 @@ export default {
 		try {
 			const response = await routeRequest(request, env, url);
 			if (response.status >= 500) {
-				ctx.waitUntil(recordAppEvent(env, {
+					logAppEvent({
 					level: "error",
 					event: "http_error_response",
 					operation: `${request.method} ${url.pathname}`,
 					status_code: response.status,
 					duration_ms: Date.now() - startedAt,
 					message: response.statusText || `HTTP ${response.status}`,
-				}));
+				});
 			}
 			return response;
 		} catch (err) {
 			const message = errorMessage(err);
-			ctx.waitUntil(recordAppEvent(env, {
+			logAppEvent({
 				level: "error",
 				event: "http_unhandled_exception",
 				operation: `${request.method} ${url.pathname}`,
 				duration_ms: Date.now() - startedAt,
 				message,
 				details: errorDetails(err),
-			}));
+			});
 			console.error("Unhandled request error", {
 				error: message,
 				method: request.method,
@@ -843,16 +827,15 @@ export default {
 			const startedAt = Date.now();
 			try {
 				const queued = await radioStation(env).fill(RADIO_TARGET_BACKLOG, RADIO_STATION_ID);
-				const prunedEvents = await pruneAppEvents(env);
-				await recordAppEvent(env, {
+				logAppEvent({
 					level: "info",
 					event: "scheduled_radio_fill",
 					operation: "scheduled",
 					duration_ms: Date.now() - startedAt,
-					details: { pruned_events: prunedEvents, queued },
+					details: { queued },
 				});
 			} catch (err) {
-				await recordAppEvent(env, {
+				logAppEvent({
 					level: "error",
 					event: "scheduled_radio_fill_failed",
 					operation: "scheduled",
@@ -889,9 +872,6 @@ async function routeRequest(request: Request, env: Env, url = new URL(request.ur
 	}
 	if (url.pathname === "/api/radio/stations" && request.method === "GET") {
 		return handleRadioStations(env);
-	}
-	if (url.pathname === "/api/admin/events" && request.method === "GET") {
-		return handleAppEvents(request, env);
 	}
 	if (url.pathname === "/api/admin/radio/in-flight" && request.method === "DELETE") {
 		return handleRadioInFlightCleanup(request, env);
@@ -1003,62 +983,11 @@ function lyricQualityDetails(lyrics: string): Record<string, unknown> {
 	};
 }
 
-function safeDetailsJson(details: Record<string, unknown> | undefined): string | null {
-	if (!details) return null;
-	try {
-		return JSON.stringify(details).slice(0, 8000);
-	} catch {
-		return JSON.stringify({ serialization_error: true });
-	}
-}
-
-async function recordAppEvent(env: Env, event: AppEvent): Promise<void> {
-	const createdAt = Date.now();
-	const detailsJson = safeDetailsJson(event.details);
-	const payload = {
-		created_at: createdAt,
-		...event,
-		details_json: detailsJson,
-	};
+function logAppEvent(event: AppEvent): void {
+	const payload = { created_at: Date.now(), ...event };
 	if (event.level === "error") console.error("app_event", payload);
 	else if (event.level === "warn") console.warn("app_event", payload);
 	else console.info("app_event", payload);
-	try {
-		await env.DB.prepare(
-			`INSERT INTO app_events (
-				created_at, level, event, operation, model, song_id, request_id,
-				workflow_instance_id, job_id, status_code, duration_ms, message, details_json
-			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		).bind(
-			createdAt,
-			event.level,
-			event.event,
-			event.operation ?? null,
-			event.model ?? null,
-			event.song_id ?? null,
-			event.request_id ?? null,
-			event.workflow_instance_id ?? null,
-			event.job_id ?? null,
-			event.status_code ?? null,
-			event.duration_ms ?? null,
-			event.message ?? null,
-			detailsJson,
-		).run();
-	} catch (err) {
-		console.error("app_event_persist_failed", {
-			error: errorMessage(err),
-			event: event.event,
-			level: event.level,
-		});
-	}
-}
-
-async function pruneAppEvents(env: Env, retentionMs = APP_EVENT_RETENTION_MS): Promise<number> {
-	const result = await env.DB.prepare(
-		"DELETE FROM app_events WHERE created_at < ?",
-	).bind(Date.now() - retentionMs).run();
-	return result.meta.changes ?? 0;
 }
 
 function normalizeRadioGenerateMessage(input: Partial<RadioGenerateMessage>): RadioGenerateMessage {
@@ -1091,7 +1020,7 @@ async function handleGenerate(request: Request, env: Env): Promise<Response> {
 	if ("error" in input) return json(input, 400);
 
 	if (!env.AI_GATEWAY_ID) {
-		await recordAppEvent(env, {
+		logAppEvent({
 			level: "error",
 			event: "configuration_error",
 			operation: "generate",
@@ -1176,7 +1105,7 @@ async function handleAudio(request: Request, jobId: string, env: Env): Promise<R
 	}
 	if (!upstream.ok || !upstream.body) {
 		const text = await upstream.text().catch(() => "");
-		await recordAppEvent(env, {
+		logAppEvent({
 			level: "error",
 			event: "audio_proxy_failed",
 			operation: "GET /api/audio/:jobId",
@@ -1313,15 +1242,30 @@ async function handleLibrarySong(songId: string, env: Env): Promise<Response> {
 	const row = await env.DB.prepare(
 		`SELECT id, station_id, title, prompt, cover_art_object_key, cover_art_prompt, cover_art_model,
 			cover_art_created_at, request_id, request_text, lyrics, lyrics_source, music_model, text_model,
-			generation_input_json, prompt_plan_json, format, audio_object_key,
+			format, audio_object_key,
 			audio_content_type, primary_genre, genre_key, mood, energy, bpm_min, bpm_max, vocal_style,
 			created_at, completed_at, duration_ms
 		 FROM songs
 		 WHERE id = ?`,
 	).bind(songId).first<SongRow>();
 	if (!row) return json({ error: "song not found" }, 404);
-	const tags = await loadSongTags(env.DB, [songId]);
-	return json(songFromRow(row, tags.get(songId) ?? []));
+	const [tags, detailsObj] = await Promise.all([
+		loadSongTags(env.DB, [songId]),
+		env.AUDIO_BUCKET.get(radioDetailsObjectKey(songId)),
+	]);
+	const song = songFromRow(row, tags.get(songId) ?? []);
+	if (detailsObj) {
+		try {
+			const details = JSON.parse(await detailsObj.text()) as Record<string, unknown>;
+			if (details.generation_input && typeof details.generation_input === "object") {
+				song.generation_input = details.generation_input as Record<string, unknown>;
+			}
+			if (details.prompt_plan && typeof details.prompt_plan === "object") {
+				song.prompt_plan = details.prompt_plan as RadioPromptPlan;
+			}
+		} catch { /* ignore malformed JSON */ }
+	}
+	return json(song);
 }
 
 async function handleRadioInFlightCleanup(request: Request, env: Env): Promise<Response> {
@@ -1341,43 +1285,6 @@ async function handleRadioInFlightCleanup(request: Request, env: Env): Promise<R
 	const stationId = typeof raw.station_id === "string" && raw.station_id ? raw.station_id : RADIO_STATION_ID;
 	const result = await radioStation(env, stationId).clearInFlight(songIds);
 	return json({ station_id: stationId, ...result });
-}
-
-async function handleAppEvents(request: Request, env: Env): Promise<Response> {
-	const tokenEnv = env as Env & { OBSERVABILITY_TOKEN?: string };
-	const token = tokenEnv.OBSERVABILITY_TOKEN;
-	if (!token) return json({ error: "observability token not configured" }, 503);
-	if (request.headers.get("Authorization") !== `Bearer ${token}`) {
-		return json({ error: "unauthorized" }, 401);
-	}
-
-	const url = new URL(request.url);
-	const limit = normalizeBoundedInt(Number(url.searchParams.get("limit") ?? 50), 1, 100) ?? 50;
-	const filters: string[] = [];
-	const params: Array<number | string> = [];
-	for (const field of ["level", "event", "model", "song_id"] as const) {
-		const value = url.searchParams.get(field);
-		if (!value) continue;
-		filters.push(`${field} = ?`);
-		params.push(value);
-	}
-	const where = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
-	const rows = await env.DB.prepare(
-		`SELECT id, created_at, level, event, operation, model, song_id, request_id,
-			workflow_instance_id, job_id, status_code, duration_ms, message, details_json
-		 FROM app_events
-		 ${where}
-		 ORDER BY created_at DESC
-		 LIMIT ?`,
-	).bind(...params, limit).all<AppEventRow>();
-	return json({
-		events: (rows.results ?? []).map((row) => ({
-			...row,
-			details: parseJsonRecord(row.details_json),
-			details_json: undefined,
-		})),
-		limit,
-	});
 }
 
 async function handleRadioAudio(request: Request, songId: string, env: Env): Promise<Response> {
@@ -1448,8 +1355,6 @@ type SongRow = {
 	lyrics_source: string | null;
 	music_model: string | null;
 	text_model: string | null;
-	generation_input_json: string | null;
-	prompt_plan_json: string | null;
 	format: MusicInput["format"];
 	audio_object_key: string;
 	audio_content_type: string;
@@ -1491,7 +1396,7 @@ async function listSongs(db: D1Database, query: LibraryQuery): Promise<{ songs: 
 		`SELECT s.id, s.station_id, s.title, s.prompt, s.cover_art_object_key, s.cover_art_prompt,
 			s.cover_art_model, s.cover_art_created_at, s.request_text, s.format, s.audio_object_key,
 			s.request_id, s.lyrics, s.lyrics_source, s.music_model, s.text_model,
-			s.generation_input_json, s.prompt_plan_json, s.audio_content_type,
+			s.audio_content_type,
 			s.primary_genre, s.genre_key, s.mood, s.energy, s.bpm_min, s.bpm_max, s.vocal_style,
 			s.created_at, s.completed_at, s.duration_ms
 		 FROM songs s
@@ -1533,7 +1438,7 @@ async function loadSongsByIds(db: D1Database, songIds: string[]): Promise<Map<st
 			`SELECT s.id, s.station_id, s.title, s.prompt, s.cover_art_object_key, s.cover_art_prompt,
 				s.cover_art_model, s.cover_art_created_at, s.request_text, s.format, s.audio_object_key,
 				s.request_id, s.lyrics, s.lyrics_source, s.music_model, s.text_model,
-				s.generation_input_json, s.prompt_plan_json, s.audio_content_type,
+				s.audio_content_type,
 				s.primary_genre, s.genre_key, s.mood, s.energy, s.bpm_min, s.bpm_max, s.vocal_style,
 				s.created_at, s.completed_at, s.duration_ms
 			 FROM songs s
@@ -1609,8 +1514,6 @@ function songFromRow(row: SongRow, tags: string[]): RadioSong {
 		lyrics_source: row.lyrics_source ?? undefined,
 		music_model: row.music_model ?? undefined,
 		text_model: row.text_model ?? undefined,
-		generation_input: parseJsonRecord(row.generation_input_json),
-		prompt_plan: parseJsonRecord(row.prompt_plan_json) as RadioPromptPlan | undefined,
 		format: row.format,
 		audio_object_key: row.audio_object_key,
 		audio_content_type: row.audio_content_type,
@@ -1628,17 +1531,8 @@ function songFromRow(row: SongRow, tags: string[]): RadioSong {
 	};
 }
 
-function parseJsonRecord(value: string | null): Record<string, unknown> | undefined {
-	if (!value) return undefined;
-	try {
-		const parsed = JSON.parse(value) as unknown;
-		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-async function persistSongCatalog(db: D1Database, song: RadioSong): Promise<void> {
+async function persistSongCatalog(env: Env, song: RadioSong): Promise<void> {
+	const db = env.DB;
 	const now = Date.now();
 	const tags = normalizeTags(song.tags);
 	const station: RadioStationRecord = {
@@ -1649,16 +1543,26 @@ async function persistSongCatalog(db: D1Database, song: RadioSong): Promise<void
 		created_at: now,
 		updated_at: now,
 	};
+
+	const detailsJson: Record<string, unknown> = {};
+	if (song.generation_input) detailsJson.generation_input = song.generation_input;
+	if (song.prompt_plan) detailsJson.prompt_plan = song.prompt_plan;
+	if (Object.keys(detailsJson).length > 0) {
+		await env.AUDIO_BUCKET.put(radioDetailsObjectKey(song.id), JSON.stringify(detailsJson), {
+			httpMetadata: { contentType: "application/json" },
+		});
+	}
+
 	const statements = [
 		db.prepare(
 			`INSERT INTO songs (
 				id, station_id, title, prompt, cover_art_object_key, cover_art_prompt, cover_art_model,
 				cover_art_created_at, request_id, request_text, format, audio_object_key,
 				audio_content_type, primary_genre, genre_key, mood, energy, bpm_min, bpm_max, vocal_style,
-				lyrics, lyrics_source, music_model, text_model, generation_input_json, prompt_plan_json,
+				lyrics, lyrics_source, music_model, text_model,
 				created_at, completed_at, duration_ms
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(id) DO UPDATE SET
 				station_id = excluded.station_id,
 				title = excluded.title,
@@ -1683,8 +1587,6 @@ async function persistSongCatalog(db: D1Database, song: RadioSong): Promise<void
 				lyrics_source = excluded.lyrics_source,
 				music_model = excluded.music_model,
 				text_model = excluded.text_model,
-				generation_input_json = excluded.generation_input_json,
-				prompt_plan_json = excluded.prompt_plan_json,
 				created_at = excluded.created_at,
 				completed_at = excluded.completed_at,
 				duration_ms = excluded.duration_ms`,
@@ -1713,8 +1615,6 @@ async function persistSongCatalog(db: D1Database, song: RadioSong): Promise<void
 			song.lyrics_source ?? null,
 			song.music_model ?? null,
 			song.text_model ?? null,
-			song.generation_input ? JSON.stringify(song.generation_input) : null,
-			song.prompt_plan ? JSON.stringify(song.prompt_plan) : null,
 			song.created_at,
 			song.completed_at,
 			song.duration_ms,
@@ -1778,7 +1678,7 @@ export class RadioSongWorkflow extends WorkflowEntrypoint<Env, RadioGenerateMess
 					PERSIST_STEP_CONFIG,
 					async () => completeRadioSong(this.env, existing),
 				);
-				await recordAppEvent(this.env, {
+				logAppEvent({
 					level: "info",
 					event: "workflow_reused_existing_song",
 					operation: "radio_song_workflow",
@@ -1817,7 +1717,7 @@ export class RadioSongWorkflow extends WorkflowEntrypoint<Env, RadioGenerateMess
 					error: err instanceof Error ? err.message : String(err),
 					song_id: message.song_id,
 				});
-					await recordAppEvent(this.env, {
+					logAppEvent({
 						level: "error",
 						event: "cover_generation_failed",
 						operation: "radio_cover",
@@ -1838,7 +1738,7 @@ export class RadioSongWorkflow extends WorkflowEntrypoint<Env, RadioGenerateMess
 			return { song_id: message.song_id, status: "complete", completed_at: completed.completed_at };
 			} catch (err) {
 				const error = err instanceof Error ? err.message : String(err);
-				await recordAppEvent(this.env, {
+				logAppEvent({
 					level: "error",
 					event: "workflow_failed",
 					operation: "radio_song_workflow",
@@ -1893,7 +1793,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 				error: err instanceof Error ? err.message : String(err),
 				song_id: message.song_id,
 			});
-			await recordAppEvent(env, {
+			logAppEvent({
 				level: "warn",
 				event: "model_fallback",
 				operation: "radio_prompt",
@@ -1921,7 +1821,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 					error: err instanceof Error ? err.message : String(err),
 					song_id: message.song_id,
 				});
-				await recordAppEvent(env, {
+				logAppEvent({
 					level: "warn",
 					event: "model_fallback",
 					operation: "radio_title_repair",
@@ -1949,7 +1849,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 				error: err instanceof Error ? err.message : String(err),
 				song_id: message.song_id,
 			});
-			await recordAppEvent(env, {
+			logAppEvent({
 				level: "warn",
 				event: "model_fallback",
 				operation: "radio_lyrics",
@@ -1976,7 +1876,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 				error: err instanceof Error ? err.message : String(err),
 				song_id: message.song_id,
 			});
-			await recordAppEvent(env, {
+			logAppEvent({
 				level: "warn",
 				event: "model_fallback",
 				operation: "radio_overused_noun_review",
@@ -1997,7 +1897,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 			return undefined;
 		});
 		if (overusedNounConflict && attempt === 0) {
-			await recordAppEvent(env, {
+			logAppEvent({
 				level: "warn",
 				event: "radio_draft_rejected",
 				operation: "radio_draft_review",
@@ -2022,7 +1922,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 				error: err instanceof Error ? err.message : String(err),
 				song_id: message.song_id,
 			});
-			await recordAppEvent(env, {
+			logAppEvent({
 				level: "warn",
 				event: "model_fallback",
 				operation: "radio_similarity",
@@ -2044,7 +1944,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 		});
 		if (similarity.too_similar && attempt === 0) {
 			repairGuidance = similarity.repair_guidance || similarity.reason || "Make the title, lyrical premise, arrangement, and production language less similar to recent or in-flight songs.";
-			await recordAppEvent(env, {
+			logAppEvent({
 				level: "warn",
 				event: "radio_draft_rejected",
 				operation: "radio_draft_review",
@@ -2068,7 +1968,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 		const reservation = radioDraftReservation(message.song_id, title, activePlan.prompt, message.request_text);
 		const reserved = await station.reserveDraft(reservation);
 		if (reserved.accepted) break;
-		await recordAppEvent(env, {
+		logAppEvent({
 			level: "warn",
 			event: "radio_draft_rejected",
 			operation: "radio_draft_reservation",
@@ -2123,7 +2023,7 @@ async function generateAndPersistRadioAudio(message: RadioGenerateMessage, env: 
 			},
 		);
 	} catch (err) {
-		await recordAppEvent(env, {
+		logAppEvent({
 			level: "error",
 			event: "model_error",
 			operation: "radio_music",
@@ -2144,7 +2044,7 @@ async function generateAndPersistRadioAudio(message: RadioGenerateMessage, env: 
 	const audio = extractAudioUrl(result);
 	if (!audio) {
 		const messageText = snippet(result) ?? "Model returned no audio URL";
-		await recordAppEvent(env, {
+		logAppEvent({
 			level: "error",
 			event: "model_empty_response",
 			operation: "radio_music",
@@ -2162,7 +2062,7 @@ async function generateAndPersistRadioAudio(message: RadioGenerateMessage, env: 
 	try {
 		upstream = await fetch(audio);
 	} catch (err) {
-		await recordAppEvent(env, {
+		logAppEvent({
 			level: "error",
 			event: "audio_fetch_error",
 			operation: "radio_music",
@@ -2182,7 +2082,7 @@ async function generateAndPersistRadioAudio(message: RadioGenerateMessage, env: 
 	}
 	if (!upstream.ok || upstream.status !== 200 || !upstream.body) {
 		const messageText = `upstream audio fetch failed before persistence: ${upstream.status}`;
-		await recordAppEvent(env, {
+		logAppEvent({
 			level: "error",
 			event: "audio_persistence_error",
 			operation: "radio_music",
@@ -2206,7 +2106,7 @@ async function generateAndPersistRadioAudio(message: RadioGenerateMessage, env: 
 	const contentType = upstream.headers.get("content-type") ?? "audio/mpeg";
 	const audioBody = prepareAudioBodyForStorage(await upstream.arrayBuffer());
 	if (audioBody.duplicate_removed) {
-		await recordAppEvent(env, {
+		logAppEvent({
 			level: "warn",
 			event: "audio_duplicate_removed",
 			operation: "radio_music",
@@ -2233,7 +2133,7 @@ async function generateAndPersistRadioAudio(message: RadioGenerateMessage, env: 
 			},
 		});
 	} catch (err) {
-		await recordAppEvent(env, {
+		logAppEvent({
 			level: "error",
 			event: "audio_persistence_error",
 			operation: "radio_music",
@@ -2253,7 +2153,7 @@ async function generateAndPersistRadioAudio(message: RadioGenerateMessage, env: 
 		throw err;
 	}
 
-	await recordAppEvent(env, {
+	logAppEvent({
 		level: "info",
 		event: "model_success",
 		operation: "radio_music",
@@ -2335,9 +2235,9 @@ async function generateRadioCoverArtFields(env: Env, song: RadioSong): Promise<R
 async function completeRadioSong(env: Env, song: RadioSong): Promise<{ completed_at: number }> {
 	const startedAt = Date.now();
 	try {
-		await persistSongCatalog(env.DB, song);
+		await persistSongCatalog(env, song);
 	} catch (err) {
-		await recordAppEvent(env, {
+		logAppEvent({
 			level: "error",
 			event: "radio_catalog_persist_failed",
 			operation: "radio_persist",
@@ -2358,7 +2258,7 @@ async function completeRadioSong(env: Env, song: RadioSong): Promise<{ completed
 	try {
 		await radioStation(env, song.station_id).complete(song);
 	} catch (err) {
-		await recordAppEvent(env, {
+		logAppEvent({
 			level: "error",
 			event: "radio_station_complete_failed",
 			operation: "radio_persist",
@@ -2409,7 +2309,7 @@ async function generateAndAttachCoverArt(env: Env, song: RadioSong): Promise<voi
 				model: candidate,
 				song_id: song.id,
 			});
-			await recordAppEvent(env, {
+			logAppEvent({
 				level: "warn",
 				event: "cover_model_error",
 				operation: "radio_cover",
@@ -2439,7 +2339,7 @@ async function generateAndAttachCoverArt(env: Env, song: RadioSong): Promise<voi
 	song.cover_art_prompt = prompt;
 	song.cover_art_model = model;
 	song.cover_art_created_at = Date.now();
-	await recordAppEvent(env, {
+	logAppEvent({
 		level: "info",
 		event: model === attempts[0] ? "cover_model_success" : "cover_model_fallback_success",
 		operation: "radio_cover",
@@ -2746,7 +2646,7 @@ async function createRadioPrompt(
 
 	const parsed = parsePromptPlanResponse(response);
 	if (!parsed.prompt && !parsed.title) {
-		await recordAppEvent(env, {
+		logAppEvent({
 			level: "warn",
 			event: "radio_prompt_invalid_response",
 			operation: "radio_prompt",
@@ -2778,7 +2678,7 @@ async function createRadioPrompt(
 		parsed.vocal_style ? "" : "vocal_style",
 	].filter(Boolean);
 	if (missingFields.length > 0) {
-		await recordAppEvent(env, {
+		logAppEvent({
 			level: "info",
 			event: "radio_prompt_partial_fallback",
 			operation: "radio_prompt",
@@ -2885,7 +2785,7 @@ async function createRadioLyrics(
 				},
 			);
 		} catch (err) {
-			await recordAppEvent(env, {
+			logAppEvent({
 				level: "warn",
 				event: "radio_lyrics_model_error",
 				operation: "radio_lyrics",
@@ -2915,7 +2815,7 @@ async function createRadioLyrics(
 		const lyrics = normalizeRadioLyrics(parsed.lyrics ?? "");
 		if (isUsableRadioLyrics(lyrics)) return { lyrics, model };
 		lastSnippet = snippet(response) ?? "empty response";
-		await recordAppEvent(env, {
+		logAppEvent({
 			level: "warn",
 			event: "radio_lyrics_invalid_attempt",
 			operation: "radio_lyrics",
@@ -3073,7 +2973,7 @@ async function repairRadioTitle(
 		: looseStringField(extractTextResponse(response) ?? "", "title", []) ?? extractTextResponse(response);
 	const title = sanitizeRadioTitle(rawTitle ?? "");
 	if (!title || title.split(/\s+/).length < 2 || containsTechnicalLeak(title)) {
-		await recordAppEvent(env, {
+		logAppEvent({
 			level: "warn",
 			event: "radio_title_repair_invalid_response",
 			operation: "radio_title_repair",
