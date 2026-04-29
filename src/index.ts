@@ -3041,6 +3041,7 @@ const recentSongContextCache = new Map<string, { data: RecentSongContext[]; expi
 async function recentSongContext(db: D1Database, stationId: string): Promise<RecentSongContext[]> {
 	const cached = recentSongContextCache.get(stationId);
 	if (cached && cached.expires > Date.now()) return cached.data;
+	if (cached) recentSongContextCache.delete(stationId);
 
 	const rows = await db.prepare(
 		`SELECT title, prompt, lyrics, cover_art_prompt, primary_genre, mood, energy, bpm_min, bpm_max, vocal_style
