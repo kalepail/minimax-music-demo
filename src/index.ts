@@ -2533,10 +2533,11 @@ function coverModelInput(model: string, prompt: string, negativePrompt = COVER_N
 }
 
 function coverModelOptions(env: Env, model: string): AiOptions {
+	const useGateway = !isMultipartCoverModel(model);
 	const options: AiOptions = {
-		signal: AbortSignal.timeout(60_000),
+		signal: AbortSignal.timeout(useGateway ? 60_000 * 2 + 1000 : 60_000),
 	};
-	if (!isMultipartCoverModel(model)) {
+	if (useGateway) {
 		options.gateway = {
 			id: env.AI_GATEWAY_ID,
 			requestTimeoutMs: 60_000,
@@ -2786,7 +2787,7 @@ ${negativeConstraints || "No saturated dimensions yet."}
 				requestTimeoutMs: RADIO_PROMPT_TIMEOUT_MS,
 				retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 			},
-			signal: AbortSignal.timeout(RADIO_PROMPT_TIMEOUT_MS),
+				signal: AbortSignal.timeout(RADIO_PROMPT_TIMEOUT_MS * 2 + 1000),
 		},
 	);
 
@@ -2970,7 +2971,7 @@ ${repairInstruction}
 						requestTimeoutMs: RADIO_LYRICS_TIMEOUT_MS,
 						retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 					},
-					signal: AbortSignal.timeout(RADIO_LYRICS_TIMEOUT_MS),
+					signal: AbortSignal.timeout(RADIO_LYRICS_TIMEOUT_MS * 2 + 1000),
 				},
 			);
 		} catch (err) {
@@ -3120,7 +3121,7 @@ Lyrics excerpt: ${(item.lyrics ?? "").slice(0, 450) || "not available"}`).join("
 					requestTimeoutMs: RADIO_REVIEW_TIMEOUT_MS,
 					retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 				},
-				signal: AbortSignal.timeout(RADIO_REVIEW_TIMEOUT_MS),
+				signal: AbortSignal.timeout(RADIO_REVIEW_TIMEOUT_MS * 2 + 1000),
 			},
 		);
 	return parseSimilarityReview(response);
@@ -3189,7 +3190,7 @@ Return only the JSON object requested by the schema.
 					requestTimeoutMs: RADIO_REVIEW_TIMEOUT_MS,
 					retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 				},
-				signal: AbortSignal.timeout(RADIO_REVIEW_TIMEOUT_MS),
+				signal: AbortSignal.timeout(RADIO_REVIEW_TIMEOUT_MS * 2 + 1000),
 			},
 		);
 	const responseObject = response && typeof response === "object" ? response as Record<string, unknown> : undefined;
@@ -3420,7 +3421,7 @@ ${vocalDirection}
 				requestTimeoutMs: 15_000,
 				retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 			},
-			signal: AbortSignal.timeout(15_000),
+			signal: AbortSignal.timeout(15_000 * 2 + 1000),
 		},
 	);
 	const enriched = extractTextResponse(response)?.trim();
