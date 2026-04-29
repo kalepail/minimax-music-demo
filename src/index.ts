@@ -2673,7 +2673,7 @@ async function createRadioPrompt(
 	const requestContext = message.request_text
 		? message.request_text
 		: "None.";
-	const structuralConstraint = selectStructuralConstraint(message.song_id, recent.map((item) => item.prompt));
+	const structuralConstraint = selectStructuralConstraint(message.song_id, recent.length, draftReservations);
 	const negativeConstraints = catalogNegativeConstraints(recent);
 	const fallback = fallbackRadioPrompt(message);
 	const promptStartedAt = Date.now();
@@ -3413,15 +3413,12 @@ ${vocalDirection}
 	return enriched.slice(0, 2000);
 }
 
-function selectStructuralConstraint(songId: string, recentPrompts: string[]): string {
-	const recentLower = recentPrompts.map((p) => p.toLowerCase());
-	const unused = STRUCTURAL_CONSTRAINTS.filter((constraint) => {
-		const key = constraint.slice(0, 60).toLowerCase();
-		return !recentLower.some((p) => p.includes(key));
-	});
-	const pool = unused.length > 0 ? unused : STRUCTURAL_CONSTRAINTS;
+function selectStructuralConstraint(songId: string, recentCount: number, draftReservations: ReadonlyArray<RadioDraftReservation>): string {
 	const hash = songId.split("").reduce((acc, char) => ((acc << 5) - acc + char.charCodeAt(0)) | 0, 0);
-	return pool[Math.abs(hash) % pool.length];
+	const baseIndex = (recentCount + Math.abs(hash)) % STRUCTURAL_CONSTRAINTS.length;
+	const draftCount = draftReservations.length;
+	const offset = draftCount % STRUCTURAL_CONSTRAINTS.length;
+	return STRUCTURAL_CONSTRAINTS[(baseIndex + offset) % STRUCTURAL_CONSTRAINTS.length];
 }
 
 function catalogNegativeConstraints(recent: ReadonlyArray<RecentSongContext>): string {
