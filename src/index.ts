@@ -353,7 +353,7 @@ export class MusicJob extends DurableObject<Env> {
 					gateway: {
 						id: gatewayId,
 						requestTimeoutMs: ATTEMPT_TIMEOUT_MS,
-						retries: { maxAttempts: 2, retryDelay: 1000, backoff: "constant" },
+						retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 					},
 					signal: AbortSignal.timeout(ATTEMPT_TIMEOUT_MS),
 				},
@@ -489,11 +489,23 @@ export class MusicJob extends DurableObject<Env> {
 
 export class RadioStation extends DurableObject<Env> {
 	async status(): Promise<RadioStatus> {
-		const [playlist, storedRequests, inFlight] = await Promise.all([
-			loadStationPlaylist(this.env.DB, RADIO_STATION_ID),
+		const [playlistResult, storedRequests, inFlight] = await Promise.all([
+			loadStationPlaylist(this.env.DB, RADIO_STATION_ID).then(
+				(songs) => {
+					this.ctx.storage.put("playlist_cache", songs);
+					return songs;
+				},
+				async (err) => {
+					console.warn("D1 playlist load failed; falling back to cached playlist", {
+						error: err instanceof Error ? err.message : String(err),
+					});
+					return (await this.ctx.storage.get<RadioSong[]>("playlist_cache")) ?? [];
+				},
+			),
 			this.requests(),
 			this.inFlight(),
 		]);
+		const playlist = playlistResult;
 		const requests = removeFulfilledRequests(storedRequests, playlist);
 		if (requests.length !== storedRequests.length) {
 			await this.ctx.storage.put("requests", requests);
@@ -931,6 +943,7 @@ function errorKind(err: unknown): string {
 	if (/\brate.?limit|429/i.test(message)) return "rate_limit";
 	if (/\bquota|limit exceeded/i.test(message)) return "quota";
 	if (/\bjson\b|parse/i.test(message)) return "parse";
+	if (/\binternal server error\b|502|503|\bservice unavailable\b|\bbad gateway\b/i.test(message)) return "upstream";
 	return "error";
 }
 
@@ -2099,7 +2112,7 @@ async function generateAndPersistRadioAudio(message: RadioGenerateMessage, env: 
 				gateway: {
 					id: env.AI_GATEWAY_ID,
 					requestTimeoutMs: ATTEMPT_TIMEOUT_MS,
-					retries: { maxAttempts: 2, retryDelay: 1000, backoff: "constant" },
+					retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 				},
 				signal: AbortSignal.timeout(ATTEMPT_TIMEOUT_MS),
 			},
@@ -2527,7 +2540,7 @@ function coverModelOptions(env: Env, model: string): AiOptions {
 		options.gateway = {
 			id: env.AI_GATEWAY_ID,
 			requestTimeoutMs: 60_000,
-			retries: { maxAttempts: 2, retryDelay: 1000, backoff: "constant" },
+			retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 		};
 	}
 	return options;
@@ -2771,7 +2784,7 @@ ${negativeConstraints || "No saturated dimensions yet."}
 			gateway: {
 				id: env.AI_GATEWAY_ID,
 				requestTimeoutMs: RADIO_PROMPT_TIMEOUT_MS,
-				retries: { maxAttempts: 2, retryDelay: 1000, backoff: "constant" },
+				retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 			},
 			signal: AbortSignal.timeout(RADIO_PROMPT_TIMEOUT_MS),
 		},
@@ -2955,7 +2968,7 @@ ${repairInstruction}
 					gateway: {
 						id: env.AI_GATEWAY_ID,
 						requestTimeoutMs: RADIO_LYRICS_TIMEOUT_MS,
-						retries: { maxAttempts: 2, retryDelay: 1000, backoff: "constant" },
+						retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 					},
 					signal: AbortSignal.timeout(RADIO_LYRICS_TIMEOUT_MS),
 				},
@@ -3105,7 +3118,7 @@ Lyrics excerpt: ${(item.lyrics ?? "").slice(0, 450) || "not available"}`).join("
 				gateway: {
 					id: env.AI_GATEWAY_ID,
 					requestTimeoutMs: RADIO_REVIEW_TIMEOUT_MS,
-					retries: { maxAttempts: 2, retryDelay: 1000, backoff: "constant" },
+					retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 				},
 				signal: AbortSignal.timeout(RADIO_REVIEW_TIMEOUT_MS),
 			},
@@ -3174,7 +3187,7 @@ Return only the JSON object requested by the schema.
 				gateway: {
 					id: env.AI_GATEWAY_ID,
 					requestTimeoutMs: RADIO_REVIEW_TIMEOUT_MS,
-					retries: { maxAttempts: 2, retryDelay: 1000, backoff: "constant" },
+					retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 				},
 				signal: AbortSignal.timeout(RADIO_REVIEW_TIMEOUT_MS),
 			},
@@ -3405,7 +3418,7 @@ ${vocalDirection}
 			gateway: {
 				id: gatewayId,
 				requestTimeoutMs: 15_000,
-				retries: { maxAttempts: 2, retryDelay: 1000, backoff: "constant" },
+				retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 			},
 			signal: AbortSignal.timeout(15_000),
 		},
