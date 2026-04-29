@@ -353,7 +353,7 @@ export class MusicJob extends DurableObject<Env> {
 					gateway: {
 						id: gatewayId,
 						requestTimeoutMs: ATTEMPT_TIMEOUT_MS,
-						retries: { maxAttempts: 1 },
+						retries: { maxAttempts: 2, retryDelay: 1000, backoff: "constant" },
 					},
 					signal: AbortSignal.timeout(ATTEMPT_TIMEOUT_MS),
 				},
@@ -2099,7 +2099,7 @@ async function generateAndPersistRadioAudio(message: RadioGenerateMessage, env: 
 				gateway: {
 					id: env.AI_GATEWAY_ID,
 					requestTimeoutMs: ATTEMPT_TIMEOUT_MS,
-					retries: { maxAttempts: 1 },
+					retries: { maxAttempts: 2, retryDelay: 1000, backoff: "constant" },
 				},
 				signal: AbortSignal.timeout(ATTEMPT_TIMEOUT_MS),
 			},
@@ -2527,7 +2527,7 @@ function coverModelOptions(env: Env, model: string): AiOptions {
 		options.gateway = {
 			id: env.AI_GATEWAY_ID,
 			requestTimeoutMs: 60_000,
-			retries: { maxAttempts: 1 },
+			retries: { maxAttempts: 2, retryDelay: 1000, backoff: "constant" },
 		};
 	}
 	return options;
@@ -2771,7 +2771,7 @@ ${negativeConstraints || "No saturated dimensions yet."}
 			gateway: {
 				id: env.AI_GATEWAY_ID,
 				requestTimeoutMs: RADIO_PROMPT_TIMEOUT_MS,
-				retries: { maxAttempts: 1 },
+				retries: { maxAttempts: 2, retryDelay: 1000, backoff: "constant" },
 			},
 			signal: AbortSignal.timeout(RADIO_PROMPT_TIMEOUT_MS),
 		},
@@ -2955,7 +2955,7 @@ ${repairInstruction}
 					gateway: {
 						id: env.AI_GATEWAY_ID,
 						requestTimeoutMs: RADIO_LYRICS_TIMEOUT_MS,
-						retries: { maxAttempts: 1 },
+						retries: { maxAttempts: 2, retryDelay: 1000, backoff: "constant" },
 					},
 					signal: AbortSignal.timeout(RADIO_LYRICS_TIMEOUT_MS),
 				},
@@ -3105,7 +3105,7 @@ Lyrics excerpt: ${(item.lyrics ?? "").slice(0, 450) || "not available"}`).join("
 				gateway: {
 					id: env.AI_GATEWAY_ID,
 					requestTimeoutMs: RADIO_REVIEW_TIMEOUT_MS,
-					retries: { maxAttempts: 1 },
+					retries: { maxAttempts: 2, retryDelay: 1000, backoff: "constant" },
 				},
 				signal: AbortSignal.timeout(RADIO_REVIEW_TIMEOUT_MS),
 			},
@@ -3174,7 +3174,7 @@ Return only the JSON object requested by the schema.
 				gateway: {
 					id: env.AI_GATEWAY_ID,
 					requestTimeoutMs: RADIO_REVIEW_TIMEOUT_MS,
-					retries: { maxAttempts: 1 },
+					retries: { maxAttempts: 2, retryDelay: 1000, backoff: "constant" },
 				},
 				signal: AbortSignal.timeout(RADIO_REVIEW_TIMEOUT_MS),
 			},
@@ -3405,7 +3405,7 @@ ${vocalDirection}
 			gateway: {
 				id: gatewayId,
 				requestTimeoutMs: 15_000,
-				retries: { maxAttempts: 1 },
+				retries: { maxAttempts: 2, retryDelay: 1000, backoff: "constant" },
 			},
 			signal: AbortSignal.timeout(15_000),
 		},
