@@ -374,9 +374,9 @@ export class MusicJob extends DurableObject<Env> {
 					gateway: {
 						id: gatewayId,
 						requestTimeoutMs: ATTEMPT_TIMEOUT_MS,
-						retries: { maxAttempts: 1 },
+						retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 					},
-					signal: AbortSignal.timeout(ATTEMPT_TIMEOUT_MS),
+					signal: AbortSignal.timeout(ATTEMPT_TIMEOUT_MS * 2 + 1000),
 				},
 			);
 		} catch (err) {
@@ -510,11 +510,23 @@ export class MusicJob extends DurableObject<Env> {
 
 export class RadioStation extends DurableObject<Env> {
 	async status(): Promise<RadioStatus> {
-		const [playlist, storedRequests, inFlight] = await Promise.all([
-			loadStationPlaylist(this.env.DB, RADIO_STATION_ID),
+		const [playlistResult, storedRequests, inFlight] = await Promise.all([
+			loadStationPlaylist(this.env.DB, RADIO_STATION_ID).then(
+				(songs) => {
+					this.ctx.storage.put("playlist_cache", songs).catch(() => {});
+					return songs;
+				},
+				async (err) => {
+					console.warn("D1 playlist load failed; falling back to cached playlist", {
+						error: err instanceof Error ? err.message : String(err),
+					});
+					return (await this.ctx.storage.get<RadioSong[]>("playlist_cache")) ?? [];
+				},
+			),
 			this.requests(),
 			this.inFlight(),
 		]);
+		const playlist = playlistResult;
 		const requests = removeFulfilledRequests(storedRequests, playlist);
 		if (requests.length !== storedRequests.length) {
 			await this.ctx.storage.put("requests", requests);
@@ -952,6 +964,7 @@ function errorKind(err: unknown): string {
 	if (/\brate.?limit|429/i.test(message)) return "rate_limit";
 	if (/\bquota|limit exceeded/i.test(message)) return "quota";
 	if (/\bjson\b|parse/i.test(message)) return "parse";
+	if (/\binternal server error\b|502|503|\bservice unavailable\b|\bbad gateway\b/i.test(message)) return "upstream";
 	return "error";
 }
 
@@ -989,9 +1002,9 @@ function lyricQualityDetails(lyrics: string): Record<string, unknown> {
 	if (lyrics.length < 650) reasons.push("too_short");
 	if (lyrics.length > LYRICS_MAX_CHARS) reasons.push("too_long");
 	if (!/\[Verse(?:\s+\d+)?\]/i.test(lyrics)) reasons.push("missing_verse");
-	if (!/\[Chorus\]/i.test(lyrics)) reasons.push("missing_chorus");
+	if (!/\[Chorus(?:\s+\d+)?\]/i.test(lyrics)) reasons.push("missing_chorus");
 	if (/\b[a-z]+-[a-z]+-[a-f0-9]{6,}\b/i.test(lyrics) || /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}/i.test(lyrics)) reasons.push("id_leak");
-	if (/^\s*(Verse|Chorus|Bridge|Outro)\s*:/im.test(lyrics)) reasons.push("colon_section_labels");
+	if (/^\s*(Verse|Chorus|Bridge|Outro)(?:\s+\d+)?\s*:/im.test(lyrics)) reasons.push("colon_section_labels");
 	if (lyricLines.length < 16) reasons.push("too_few_lyric_lines");
 	if (lyricLines.length >= 16 && uniqueLines.size < Math.ceil(lyricLines.length * 0.55)) reasons.push("too_repetitive");
 	return {
@@ -1880,6 +1893,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 	let lyrics: string | undefined;
 	let lyricsModel: string | undefined;
 	for (let attempt = 0; attempt < 2; attempt++) {
+		const recent = await recentSongContext(env.DB, message.station_id);
 		const draftAttemptStartedAt = Date.now();
 		const attemptNumber = attempt + 1;
 		const workflowInstanceId = radioSongWorkflowInstanceId(message.song_id);
@@ -1888,7 +1902,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 			attempt_number: attemptNumber,
 			workflow_instance_id: workflowInstanceId,
 		};
-		plan = await createRadioPrompt(message, env, draftReservations, repairGuidance).catch(async (err) => {
+		plan = await createRadioPrompt(message, env, recent, draftReservations, repairGuidance).catch(async (err) => {
 			console.warn("Radio prompt expansion failed; using fallback prompt", {
 				error: err instanceof Error ? err.message : String(err),
 				song_id: message.song_id,
@@ -1916,7 +1930,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 		const activePlan: RadioPromptPlan = plan;
 		title = await ensureCatalogDistinctTitle(env.DB, activePlan.title, message);
 		if (isFallbackTitle(title)) {
-			const repairedTitle = await repairRadioTitle(activePlan, message, env, draftReservations).catch(async (err) => {
+			const repairedTitle = await repairRadioTitle(activePlan, message, env, recent, draftReservations).catch(async (err) => {
 				console.warn("Radio title repair failed; using fallback title", {
 					error: err instanceof Error ? err.message : String(err),
 					song_id: message.song_id,
@@ -1944,7 +1958,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 			title = await ensureCatalogDistinctTitle(env.DB, repairedTitle, message);
 		}
 		const lyricStartedAt = Date.now();
-		const lyricResult = await createRadioLyrics(activePlan, title, message, env, draftReservations).catch(async (err) => {
+		const lyricResult = await createRadioLyrics(activePlan, title, message, env, recent, draftReservations).catch(async (err) => {
 			console.warn("Radio lyrics generation failed; falling back to MiniMax lyrics optimizer", {
 				error: err instanceof Error ? err.message : String(err),
 				song_id: message.song_id,
@@ -1971,7 +1985,10 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 		});
 		lyrics = lyricResult?.lyrics;
 		lyricsModel = lyricResult?.model;
-		const overusedNounConflict = await reviewOverusedNounConflict({ title, prompt: activePlan.prompt, lyrics }, message, env).catch(async (err) => {
+		let overusedNounConflict: string | undefined;
+		try {
+			overusedNounConflict = reviewOverusedNounConflict({ title, prompt: activePlan.prompt, lyrics }, message, recent);
+		} catch (err) {
 			console.warn("Radio overused noun review failed; continuing with similarity review", {
 				error: err instanceof Error ? err.message : String(err),
 				song_id: message.song_id,
@@ -1994,8 +2011,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 					...errorDetails(err),
 				},
 			});
-			return undefined;
-		});
+		}
 		if (overusedNounConflict && attempt === 0) {
 			await recordAppEvent(env, {
 				level: "warn",
@@ -2017,7 +2033,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 			draftReservations = await station.draftReservations();
 			continue;
 		}
-		const similarity = await reviewDraftSimilarity({ title, prompt: activePlan.prompt, lyrics }, message, env, draftReservations).catch(async (err) => {
+		const similarity = await reviewDraftSimilarity({ title, prompt: activePlan.prompt, lyrics }, message, env, recent, draftReservations).catch(async (err) => {
 			console.warn("Radio similarity review failed; using reservation checks only", {
 				error: err instanceof Error ? err.message : String(err),
 				song_id: message.song_id,
@@ -2117,9 +2133,9 @@ async function generateAndPersistRadioAudio(message: RadioGenerateMessage, env: 
 				gateway: {
 					id: env.AI_GATEWAY_ID,
 					requestTimeoutMs: ATTEMPT_TIMEOUT_MS,
-					retries: { maxAttempts: 1 },
+					retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 				},
-				signal: AbortSignal.timeout(ATTEMPT_TIMEOUT_MS),
+				signal: AbortSignal.timeout(ATTEMPT_TIMEOUT_MS * 2 + 1000),
 			},
 		);
 	} catch (err) {
@@ -2537,14 +2553,15 @@ function coverModelInput(model: string, prompt: string, negativePrompt = COVER_N
 }
 
 function coverModelOptions(env: Env, model: string): AiOptions {
+	const useGateway = !isMultipartCoverModel(model);
 	const options: AiOptions = {
-		signal: AbortSignal.timeout(60_000),
+		signal: AbortSignal.timeout(useGateway ? 60_000 * 2 + 1000 : 60_000),
 	};
-	if (!isMultipartCoverModel(model)) {
+	if (useGateway) {
 		options.gateway = {
 			id: env.AI_GATEWAY_ID,
 			requestTimeoutMs: 60_000,
-			retries: { maxAttempts: 1 },
+			retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 		};
 	}
 	return options;
@@ -2670,11 +2687,11 @@ function base64ToBytes(value: string): Uint8Array {
 async function createRadioPrompt(
 	message: RadioGenerateMessage,
 	env: Env,
+	recent: RecentSongContext[],
 	draftReservations: RadioDraftReservation[] = [],
 	repairGuidance?: string,
 ): Promise<RadioPromptPlan> {
 	const genreLane = message.genre ? `This is for the "${message.genre}" genre radio lane. Keep it recognizably in that lane while still making it surprising.` : "";
-	const recent = await recentSongContext(env.DB, message.station_id);
 	const recentTitles = recent.map((item) => item.title).filter(Boolean);
 	const recentTitleInstruction = recentTitles.length > 0
 		? recentTitles.slice(0, 40).map((title, index) => `${index + 1}. ${title}`).join("\n")
@@ -2738,9 +2755,9 @@ async function createRadioPrompt(
 			gateway: {
 				id: env.AI_GATEWAY_ID,
 				requestTimeoutMs: RADIO_PROMPT_TIMEOUT_MS,
-				retries: { maxAttempts: 1 },
+				retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 			},
-			signal: AbortSignal.timeout(RADIO_PROMPT_TIMEOUT_MS),
+				signal: AbortSignal.timeout(RADIO_PROMPT_TIMEOUT_MS * 2 + 1000),
 		},
 	);
 
@@ -2826,9 +2843,9 @@ async function createRadioLyrics(
 	title: string,
 	message: RadioGenerateMessage,
 	env: Env,
+	recent: RecentSongContext[],
 	draftReservations: RadioDraftReservation[] = [],
 ): Promise<RadioLyricsResult> {
-	const recent = await recentSongContext(env.DB, message.station_id);
 	const recentTitleInstruction = recent.length > 0
 		? recent.slice(0, 20).map((item, index) => `${index + 1}. ${item.title}`).join("\n")
 		: "None.";
@@ -2879,9 +2896,9 @@ async function createRadioLyrics(
 					gateway: {
 						id: env.AI_GATEWAY_ID,
 						requestTimeoutMs: RADIO_LYRICS_TIMEOUT_MS,
-						retries: { maxAttempts: 1 },
+						retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 					},
-					signal: AbortSignal.timeout(RADIO_LYRICS_TIMEOUT_MS),
+					signal: AbortSignal.timeout(RADIO_LYRICS_TIMEOUT_MS * 2 + 1000),
 				},
 			);
 		} catch (err) {
@@ -2947,12 +2964,11 @@ type SimilarityReview = {
 	nearest_title?: string;
 };
 
-async function reviewOverusedNounConflict(
+function reviewOverusedNounConflict(
 	draft: { title: string; prompt: string; lyrics?: string },
 	message: RadioGenerateMessage,
-	env: Env,
-): Promise<string | undefined> {
-	const recent = await recentSongContext(env.DB, message.station_id);
+	recent: RecentSongContext[],
+): string | undefined {
 	const terms = overusedNounsFromRecent(recent);
 	if (terms.length === 0) return undefined;
 	const value = [draft.title, draft.prompt, draft.lyrics].filter(Boolean).join("\n");
@@ -2965,9 +2981,9 @@ async function reviewDraftSimilarity(
 	draft: { title: string; prompt: string; lyrics?: string },
 	message: RadioGenerateMessage,
 	env: Env,
+	recent: RecentSongContext[],
 	draftReservations: RadioDraftReservation[],
 ): Promise<SimilarityReview> {
-	const recent = await recentSongContext(env.DB, message.station_id);
 	const comparable = [
 		...draftReservations.slice(0, 12).map((item) => ({
 			title: item.title,
@@ -3010,9 +3026,9 @@ async function reviewDraftSimilarity(
 				gateway: {
 					id: env.AI_GATEWAY_ID,
 					requestTimeoutMs: RADIO_REVIEW_TIMEOUT_MS,
-					retries: { maxAttempts: 1 },
+					retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 				},
-				signal: AbortSignal.timeout(RADIO_REVIEW_TIMEOUT_MS),
+				signal: AbortSignal.timeout(RADIO_REVIEW_TIMEOUT_MS * 2 + 1000),
 			},
 		);
 	return parseSimilarityReview(response);
@@ -3022,9 +3038,9 @@ async function repairRadioTitle(
 	plan: RadioPromptPlan,
 	message: RadioGenerateMessage,
 	env: Env,
+	recent: RecentSongContext[],
 	draftReservations: RadioDraftReservation[],
 ): Promise<string> {
-	const recent = await recentSongContext(env.DB, message.station_id);
 	const overusedNounInstruction = overusedNounRetirementInstruction(recent);
 	const response = await env.AI.run(
 		RADIO_TITLE_MODEL,
@@ -3059,9 +3075,9 @@ async function repairRadioTitle(
 				gateway: {
 					id: env.AI_GATEWAY_ID,
 					requestTimeoutMs: RADIO_REVIEW_TIMEOUT_MS,
-					retries: { maxAttempts: 1 },
+					retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 				},
-				signal: AbortSignal.timeout(RADIO_REVIEW_TIMEOUT_MS),
+				signal: AbortSignal.timeout(RADIO_REVIEW_TIMEOUT_MS * 2 + 1000),
 			},
 		);
 	const responseObject = response && typeof response === "object" ? response as Record<string, unknown> : undefined;
@@ -3290,9 +3306,9 @@ ${vocalDirection}
 			gateway: {
 				id: gatewayId,
 				requestTimeoutMs: 15_000,
-				retries: { maxAttempts: 1 },
+				retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 			},
-			signal: AbortSignal.timeout(15_000),
+			signal: AbortSignal.timeout(15_000 * 2 + 1000),
 		},
 	);
 	const enriched = extractTextResponse(response)?.trim();
@@ -3522,9 +3538,10 @@ function normalizeRadioLyrics(value: string): string {
 		.replace(/\s*```$/i, "")
 		.replace(/\r\n?/g, "\n")
 		.replace(/\\n/g, "\n")
-		.replace(/^\s*\[(Intro|Verse(?:\s+\d+)?|Pre[- ]?Chorus|Chorus|Hook|Bridge|Break|Outro)\]\s+(.+)$/gim, "[$1]\n$2")
-		.replace(/^\s*(Intro|Verse(?:\s+\d+)?|Pre[- ]?Chorus|Chorus|Hook|Bridge|Break|Outro)\s*:\s*(.+)$/gim, "[$1]\n$2")
-		.replace(/^\s*(Intro|Verse(?:\s+\d+)?|Pre[- ]?Chorus|Chorus|Hook|Bridge|Break|Outro)\s*:\s*$/gim, "[$1]")
+		.replace(/\[\[([^\]]+)\]\]/g, "[$1]")
+		.replace(/^\s*\[(Intro(?:\s+\d+)?|Verse(?:\s+\d+)?|Pre[- ]?Chorus(?:\s+\d+)?|Chorus(?:\s+\d+)?|Hook(?:\s+\d+)?|Bridge(?:\s+\d+)?|Break(?:\s+\d+)?|Outro(?:\s+\d+)?)\]\s+(.+)$/gim, "[$1]\n$2")
+		.replace(/^\s*(Intro(?:\s+\d+)?|Verse(?:\s+\d+)?|Pre[- ]?Chorus(?:\s+\d+)?|Chorus(?:\s+\d+)?|Hook(?:\s+\d+)?|Bridge(?:\s+\d+)?|Break(?:\s+\d+)?|Outro(?:\s+\d+)?)\s*:\s*(.+)$/gim, "[$1]\n$2")
+		.replace(/^\s*(Intro(?:\s+\d+)?|Verse(?:\s+\d+)?|Pre[- ]?Chorus(?:\s+\d+)?|Chorus(?:\s+\d+)?|Hook(?:\s+\d+)?|Bridge(?:\s+\d+)?|Break(?:\s+\d+)?|Outro(?:\s+\d+)?)\s*:\s*$/gim, "[$1]")
 		.replace(/\n{3,}/g, "\n\n")
 		.trim();
 	if (lyrics.length <= LYRICS_MAX_CHARS) return lyrics;
@@ -3536,10 +3553,10 @@ function normalizeRadioLyrics(value: string): string {
 
 function isUsableRadioLyrics(lyrics: string): boolean {
 	if (lyrics.length < 650 || lyrics.length > LYRICS_MAX_CHARS) return false;
-	if (!/\[Verse(?:\s+\d+)?\]/i.test(lyrics) || !/\[Chorus\]/i.test(lyrics)) return false;
+	if (!/\[Verse(?:\s+\d+)?\]/i.test(lyrics) || !/\[Chorus(?:\s+\d+)?\]/i.test(lyrics)) return false;
 	if (/\b[a-z]+-[a-z]+-[a-f0-9]{6,}\b/i.test(lyrics)) return false;
 	if (/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}/i.test(lyrics)) return false;
-	if (/^\s*(Verse|Chorus|Bridge|Outro)\s*:/im.test(lyrics)) return false;
+	if (/^\s*(Verse|Chorus|Bridge|Outro)(?:\s+\d+)?\s*:/im.test(lyrics)) return false;
 	const lyricLines = lyrics.split("\n").map((line) => line.trim()).filter((line) => line && !/^\[[^\]]+\]$/.test(line));
 	if (lyricLines.length < 16) return false;
 	const uniqueLines = new Set(lyricLines.map((line) => line.toLowerCase()));
