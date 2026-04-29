@@ -1859,6 +1859,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 	let lyrics: string | undefined;
 	let lyricsModel: string | undefined;
 	for (let attempt = 0; attempt < 2; attempt++) {
+		const recent = await recentSongContext(env.DB, message.station_id);
 		const draftAttemptStartedAt = Date.now();
 		const attemptNumber = attempt + 1;
 		const workflowInstanceId = radioSongWorkflowInstanceId(message.song_id);
@@ -1867,7 +1868,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 			attempt_number: attemptNumber,
 			workflow_instance_id: workflowInstanceId,
 		};
-		plan = await createRadioPrompt(message, env, draftReservations, repairGuidance).catch(async (err) => {
+		plan = await createRadioPrompt(message, env, recent, draftReservations, repairGuidance).catch(async (err) => {
 			console.warn("Radio prompt expansion failed; using fallback prompt", {
 				error: err instanceof Error ? err.message : String(err),
 				song_id: message.song_id,
@@ -1895,7 +1896,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 		const activePlan: RadioPromptPlan = plan;
 		title = await ensureCatalogDistinctTitle(env.DB, activePlan.title, message);
 		if (isFallbackTitle(title)) {
-			const repairedTitle = await repairRadioTitle(activePlan, message, env, draftReservations).catch(async (err) => {
+			const repairedTitle = await repairRadioTitle(activePlan, message, env, recent, draftReservations).catch(async (err) => {
 				console.warn("Radio title repair failed; using fallback title", {
 					error: err instanceof Error ? err.message : String(err),
 					song_id: message.song_id,
@@ -1923,7 +1924,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 			title = await ensureCatalogDistinctTitle(env.DB, repairedTitle, message);
 		}
 		const lyricStartedAt = Date.now();
-		const lyricResult = await createRadioLyrics(activePlan, title, message, env, draftReservations).catch(async (err) => {
+		const lyricResult = await createRadioLyrics(activePlan, title, message, env, recent, draftReservations).catch(async (err) => {
 			console.warn("Radio lyrics generation failed; falling back to MiniMax lyrics optimizer", {
 				error: err instanceof Error ? err.message : String(err),
 				song_id: message.song_id,
@@ -1950,7 +1951,10 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 		});
 		lyrics = lyricResult?.lyrics;
 		lyricsModel = lyricResult?.model;
-		const overusedNounConflict = await reviewOverusedNounConflict({ title, prompt: activePlan.prompt, lyrics }, message, env).catch(async (err) => {
+		let overusedNounConflict: string | undefined;
+		try {
+			overusedNounConflict = reviewOverusedNounConflict({ title, prompt: activePlan.prompt, lyrics }, message, recent);
+		} catch (err) {
 			console.warn("Radio overused noun review failed; continuing with similarity review", {
 				error: err instanceof Error ? err.message : String(err),
 				song_id: message.song_id,
@@ -1973,8 +1977,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 					...errorDetails(err),
 				},
 			});
-			return undefined;
-		});
+		}
 		if (overusedNounConflict && attempt === 0) {
 			await recordAppEvent(env, {
 				level: "warn",
@@ -1996,7 +1999,7 @@ async function createAndReserveRadioDraft(message: RadioGenerateMessage, env: En
 			draftReservations = await station.draftReservations();
 			continue;
 		}
-		const similarity = await reviewDraftSimilarity({ title, prompt: activePlan.prompt, lyrics }, message, env, draftReservations).catch(async (err) => {
+		const similarity = await reviewDraftSimilarity({ title, prompt: activePlan.prompt, lyrics }, message, env, recent, draftReservations).catch(async (err) => {
 			console.warn("Radio similarity review failed; using reservation checks only", {
 				error: err instanceof Error ? err.message : String(err),
 				song_id: message.song_id,
@@ -2653,11 +2656,11 @@ function base64ToBytes(value: string): Uint8Array {
 async function createRadioPrompt(
 	message: RadioGenerateMessage,
 	env: Env,
+	recent: RecentSongContext[],
 	draftReservations: RadioDraftReservation[] = [],
 	repairGuidance?: string,
 ): Promise<RadioPromptPlan> {
 	const genreLane = message.genre ? `This is for the "${message.genre}" genre radio lane. Keep it recognizably in that lane while still making it surprising.` : "";
-	const recent = await recentSongContext(env.DB, message.station_id);
 	const recentTitles = recent.map((item) => item.title).filter(Boolean);
 	const recentTitleInstruction = recentTitles.length > 0
 		? recentTitles.slice(0, 40).map((title, index) => `${index + 1}. ${title}`).join("\n")
@@ -2856,9 +2859,9 @@ async function createRadioLyrics(
 	title: string,
 	message: RadioGenerateMessage,
 	env: Env,
+	recent: RecentSongContext[],
 	draftReservations: RadioDraftReservation[] = [],
 ): Promise<RadioLyricsResult> {
-	const recent = await recentSongContext(env.DB, message.station_id);
 	const recentTitleInstruction = recent.length > 0
 		? recent.slice(0, 20).map((item, index) => `${index + 1}. ${item.title}`).join("\n")
 		: "None.";
@@ -3020,12 +3023,11 @@ type SimilarityReview = {
 	nearest_title?: string;
 };
 
-async function reviewOverusedNounConflict(
+function reviewOverusedNounConflict(
 	draft: { title: string; prompt: string; lyrics?: string },
 	message: RadioGenerateMessage,
-	env: Env,
-): Promise<string | undefined> {
-	const recent = await recentSongContext(env.DB, message.station_id);
+	recent: RecentSongContext[],
+): string | undefined {
 	const terms = overusedNounsFromRecent(recent);
 	if (terms.length === 0) return undefined;
 	const value = [draft.title, draft.prompt, draft.lyrics].filter(Boolean).join("\n");
@@ -3038,9 +3040,9 @@ async function reviewDraftSimilarity(
 	draft: { title: string; prompt: string; lyrics?: string },
 	message: RadioGenerateMessage,
 	env: Env,
+	recent: RecentSongContext[],
 	draftReservations: RadioDraftReservation[],
 ): Promise<SimilarityReview> {
-	const recent = await recentSongContext(env.DB, message.station_id);
 	const comparable = [
 		...draftReservations.slice(0, 12).map((item) => ({
 			title: item.title,
@@ -3115,9 +3117,9 @@ async function repairRadioTitle(
 	plan: RadioPromptPlan,
 	message: RadioGenerateMessage,
 	env: Env,
+	recent: RecentSongContext[],
 	draftReservations: RadioDraftReservation[],
 ): Promise<string> {
-	const recent = await recentSongContext(env.DB, message.station_id);
 	const overusedNounInstruction = overusedNounRetirementInstruction(recent);
 	const response = await env.AI.run(
 		RADIO_TITLE_MODEL,
