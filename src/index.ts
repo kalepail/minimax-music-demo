@@ -968,9 +968,9 @@ function lyricQualityDetails(lyrics: string): Record<string, unknown> {
 	if (lyrics.length < 650) reasons.push("too_short");
 	if (lyrics.length > LYRICS_MAX_CHARS) reasons.push("too_long");
 	if (!/\[Verse(?:\s+\d+)?\]/i.test(lyrics)) reasons.push("missing_verse");
-	if (!/\[Chorus\]/i.test(lyrics)) reasons.push("missing_chorus");
+	if (!/\[Chorus(?:\s+\d+)?\]/i.test(lyrics)) reasons.push("missing_chorus");
 	if (/\b[a-z]+-[a-z]+-[a-f0-9]{6,}\b/i.test(lyrics) || /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}/i.test(lyrics)) reasons.push("id_leak");
-	if (/^\s*(Verse|Chorus|Bridge|Outro)\s*:/im.test(lyrics)) reasons.push("colon_section_labels");
+	if (/^\s*(Verse|Chorus|Bridge|Outro)(?:\s+\d+)?\s*:/im.test(lyrics)) reasons.push("colon_section_labels");
 	if (lyricLines.length < 16) reasons.push("too_few_lyric_lines");
 	if (lyricLines.length >= 16 && uniqueLines.size < Math.ceil(lyricLines.length * 0.55)) reasons.push("too_repetitive");
 	return {
@@ -3637,9 +3637,10 @@ function normalizeRadioLyrics(value: string): string {
 		.replace(/\s*```$/i, "")
 		.replace(/\r\n?/g, "\n")
 		.replace(/\\n/g, "\n")
-		.replace(/^\s*\[(Intro|Verse(?:\s+\d+)?|Pre[- ]?Chorus|Chorus|Hook|Bridge|Break|Outro)\]\s+(.+)$/gim, "[$1]\n$2")
-		.replace(/^\s*(Intro|Verse(?:\s+\d+)?|Pre[- ]?Chorus|Chorus|Hook|Bridge|Break|Outro)\s*:\s*(.+)$/gim, "[$1]\n$2")
-		.replace(/^\s*(Intro|Verse(?:\s+\d+)?|Pre[- ]?Chorus|Chorus|Hook|Bridge|Break|Outro)\s*:\s*$/gim, "[$1]")
+		.replace(/\[\[([^\]]+)\]\]/g, "[$1]")
+		.replace(/^\s*\[(Intro(?:\s+\d+)?|Verse(?:\s+\d+)?|Pre[- ]?Chorus(?:\s+\d+)?|Chorus(?:\s+\d+)?|Hook(?:\s+\d+)?|Bridge(?:\s+\d+)?|Break(?:\s+\d+)?|Outro(?:\s+\d+)?)\]\s+(.+)$/gim, "[$1]\n$2")
+		.replace(/^\s*(Intro(?:\s+\d+)?|Verse(?:\s+\d+)?|Pre[- ]?Chorus(?:\s+\d+)?|Chorus(?:\s+\d+)?|Hook(?:\s+\d+)?|Bridge(?:\s+\d+)?|Break(?:\s+\d+)?|Outro(?:\s+\d+)?)\s*:\s*(.+)$/gim, "[$1]\n$2")
+		.replace(/^\s*(Intro(?:\s+\d+)?|Verse(?:\s+\d+)?|Pre[- ]?Chorus(?:\s+\d+)?|Chorus(?:\s+\d+)?|Hook(?:\s+\d+)?|Bridge(?:\s+\d+)?|Break(?:\s+\d+)?|Outro(?:\s+\d+)?)\s*:\s*$/gim, "[$1]")
 		.replace(/\n{3,}/g, "\n\n")
 		.trim();
 	if (lyrics.length <= LYRICS_MAX_CHARS) return lyrics;
@@ -3651,10 +3652,10 @@ function normalizeRadioLyrics(value: string): string {
 
 function isUsableRadioLyrics(lyrics: string): boolean {
 	if (lyrics.length < 650 || lyrics.length > LYRICS_MAX_CHARS) return false;
-	if (!/\[Verse(?:\s+\d+)?\]/i.test(lyrics) || !/\[Chorus\]/i.test(lyrics)) return false;
+	if (!/\[Verse(?:\s+\d+)?\]/i.test(lyrics) || !/\[Chorus(?:\s+\d+)?\]/i.test(lyrics)) return false;
 	if (/\b[a-z]+-[a-z]+-[a-f0-9]{6,}\b/i.test(lyrics)) return false;
 	if (/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}/i.test(lyrics)) return false;
-	if (/^\s*(Verse|Chorus|Bridge|Outro)\s*:/im.test(lyrics)) return false;
+	if (/^\s*(Verse|Chorus|Bridge|Outro)(?:\s+\d+)?\s*:/im.test(lyrics)) return false;
 	const lyricLines = lyrics.split("\n").map((line) => line.trim()).filter((line) => line && !/^\[[^\]]+\]$/.test(line));
 	if (lyricLines.length < 16) return false;
 	const uniqueLines = new Set(lyricLines.map((line) => line.toLowerCase()));
