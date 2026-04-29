@@ -492,7 +492,7 @@ export class RadioStation extends DurableObject<Env> {
 		const [playlistResult, storedRequests, inFlight] = await Promise.all([
 			loadStationPlaylist(this.env.DB, RADIO_STATION_ID).then(
 				(songs) => {
-					this.ctx.storage.put("playlist_cache", songs);
+					this.ctx.storage.put("playlist_cache", songs).catch(() => {});
 					return songs;
 				},
 				async (err) => {
