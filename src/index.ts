@@ -355,7 +355,7 @@ export class MusicJob extends DurableObject<Env> {
 						requestTimeoutMs: ATTEMPT_TIMEOUT_MS,
 						retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 					},
-					signal: AbortSignal.timeout(ATTEMPT_TIMEOUT_MS),
+					signal: AbortSignal.timeout(ATTEMPT_TIMEOUT_MS * 2 + 1000),
 				},
 			);
 		} catch (err) {
@@ -2114,7 +2114,7 @@ async function generateAndPersistRadioAudio(message: RadioGenerateMessage, env: 
 					requestTimeoutMs: ATTEMPT_TIMEOUT_MS,
 					retries: { maxAttempts: 2, retryDelayMs: 1000, backoff: "constant" },
 				},
-				signal: AbortSignal.timeout(ATTEMPT_TIMEOUT_MS),
+				signal: AbortSignal.timeout(ATTEMPT_TIMEOUT_MS * 2 + 1000),
 			},
 		);
 	} catch (err) {
